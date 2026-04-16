@@ -112,3 +112,38 @@ def wait_for_subnet_deletion(*, k8s: K8sClient, name: str) -> None:
         delay=5,
         description=f"{name} Subnet deletion",
     )
+
+
+def wait_for_cluster_order_cr(*, k8s: K8sClient, uuid: str) -> str:
+    return poll_until(
+        fn=lambda: k8s.get_cluster_order_name(uuid=uuid, checked=False),
+        until=lambda v: v != "",
+        retries=30,
+        delay=2,
+        description=f"ClusterOrder CR for {uuid}",
+    )
+
+
+def wait_for_cluster_ready(*, k8s: K8sClient, name: str) -> None:
+    def _check_phase() -> str:
+        phase: str = k8s.get_cluster_order_phase(name=name, checked=False)
+        assert phase != "Failed", f"{name} ClusterOrder entered Failed phase"
+        return phase
+
+    poll_until(
+        fn=_check_phase,
+        until=lambda v: v == "Ready",
+        retries=120,
+        delay=15,
+        description=f"{name} ClusterOrder Ready",
+    )
+
+
+def wait_for_cluster_deletion(*, k8s: K8sClient, name: str) -> None:
+    poll_until(
+        fn=lambda: not k8s.is_present(resource="clusterorder", name=name),
+        until=lambda v: v is True,
+        retries=120,
+        delay=10,
+        description=f"{name} ClusterOrder deletion",
+    )

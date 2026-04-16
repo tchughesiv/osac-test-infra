@@ -55,3 +55,29 @@ class FulfillmentCLI:
 
     def delete_compute_instance(self, *, uuid: str) -> None:
         run(self.binary, "delete", "computeinstance", uuid)
+
+    def create_cluster(
+        self,
+        *,
+        template: str,
+        name: str | None = None,
+        template_parameters: dict[str, str] | None = None,
+        template_parameter_files: dict[str, str] | None = None,
+    ) -> str:
+        args: list[str] = [self.binary, "create", "cluster", "--template", template]
+        if name is not None:
+            args.extend(["--name", name])
+        if template_parameters is not None:
+            for key, value in template_parameters.items():
+                args.extend(["-p", f"{key}={value}"])
+        if template_parameter_files is not None:
+            for key, path in template_parameter_files.items():
+                args.extend(["-f", f"{key}={path}"])
+
+        stdout: str = run(*args)
+        match: re.Match[str] | None = re.search(r"'([^']+)'", stdout)
+        assert match is not None, f"Failed to parse UUID from CLI output: {stdout}"
+        return match.group(1)
+
+    def delete_cluster(self, *, uuid: str) -> None:
+        run(self.binary, "delete", "cluster", uuid)

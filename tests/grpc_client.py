@@ -75,3 +75,9 @@ class GRPCClient:
 
     def delete_subnet(self, *, subnet_id: str) -> None:
         self.call(service=f"{PUBLIC_API}.Subnets/Delete", data={"id": subnet_id})
+
+    # Cluster operations
+
+    def list_cluster_ids(self) -> list[str]:
+        response: dict[str, Any] = self.call(service=f"{PUBLIC_API}.Clusters/List")
+        return [item["id"] for item in response.get("items", [])]

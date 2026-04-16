@@ -184,3 +184,55 @@ class K8sClient:
         return run(
             *self._base(), "get", "virtualmachine", name, "-n", vm_namespace, "-o", "jsonpath={.spec.runStrategy}"
         )
+
+    # ClusterOrder queries
+
+    def get_cluster_order_name(self, *, uuid: str, checked: bool = True) -> str:
+        output, rc = self._get(
+            "get",
+            "clusterorder",
+            "-n",
+            self.namespace,
+            "-l",
+            f"osac.openshift.io/clusterorder-uuid={uuid}",
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+            checked=checked,
+        )
+        return output if rc == 0 else ""
+
+    def get_cluster_order_phase(self, *, name: str, checked: bool = True) -> str:
+        output, rc = self._get(
+            "get", "clusterorder", name, "-n", self.namespace, "-o", "jsonpath={.status.phase}", checked=checked
+        )
+        return output if rc == 0 else ""
+
+    def get_cluster_order_latest_job_id(self, *, name: str, job_type: str, checked: bool = True) -> str:
+        output, rc = self._get("get", "clusterorder", name, "-n", self.namespace, "-o", "json", checked=checked)
+        if rc != 0:
+            return ""
+        jobs: list[dict[str, Any]] = [
+            j for j in json.loads(output).get("status", {}).get("jobs", []) if j["type"] == job_type
+        ]
+        if not jobs:
+            return ""
+        return sorted(jobs, key=lambda j: j["timestamp"], reverse=True)[0]["jobID"]
+
+    def get_cluster_order_latest_job_state(self, *, name: str, job_type: str, checked: bool = True) -> str:
+        output, rc = self._get("get", "clusterorder", name, "-n", self.namespace, "-o", "json", checked=checked)
+        if rc != 0:
+            return ""
+        jobs: list[dict[str, Any]] = [
+            j for j in json.loads(output).get("status", {}).get("jobs", []) if j["type"] == job_type
+        ]
+        if not jobs:
+            return ""
+        return sorted(jobs, key=lambda j: j["timestamp"], reverse=True)[0].get("state", "")
+
+    def get_cluster_order_hosted_cluster_name(self, *, name: str) -> str:
+        return self.get_jsonpath(
+            resource="clusterorder", name=name, jsonpath="{.status.clusterReference.hostedClusterName}"
+        )
+
+    def get_cluster_order_namespace(self, *, name: str) -> str:
+        return self.get_jsonpath(resource="clusterorder", name=name, jsonpath="{.status.clusterReference.namespace}")
