@@ -14,7 +14,9 @@ TEST_MEMORY_GIB: int = 4
 TEST_BOOT_DISK_SIZE: int = 20
 
 
-def test_compute_instance_api_fields(k8s_hub_client: K8sClient, k8s_virt_client: K8sClient, namespace: str) -> None:
+def test_compute_instance_api_fields(
+    k8s_hub_client: K8sClient, k8s_virt_client: K8sClient, namespace: str, compute_instance_subnet: str
+) -> None:
     instance_name: str = f"e2e-test-api-fields-{int(time.time())}"
 
     manifest: str = yaml.dump(
@@ -28,6 +30,7 @@ def test_compute_instance_api_fields(k8s_hub_client: K8sClient, k8s_virt_client:
             },
             "spec": {
                 "templateID": "osac.templates.ocp_virt_vm",
+                "subnet": compute_instance_subnet,
                 "image": {"sourceType": "registry", "sourceRef": TEST_IMAGE_REF},
                 "cores": TEST_CORES,
                 "memoryGiB": TEST_MEMORY_GIB,

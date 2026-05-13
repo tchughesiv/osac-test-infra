@@ -71,6 +71,7 @@ All configuration via environment variables. Same vars work in local dev and CI.
 | `OSAC_VM_KUBECONFIG` | **(required)** | Kubeconfig for the VM cluster (where VirtualMachines run). In single-cluster setups, set this to the same value as `KUBECONFIG`. |
 | `OSAC_FULFILLMENT_ADDRESS` | auto-derived | Fulfillment API address (`host:port`) |
 | `OSAC_VM_TEMPLATE` | `osac.templates.ocp_virt_vm` | ComputeInstance template to use |
+| `OSAC_COMPUTE_INSTANCE_SUBNET` | *(optional)* | Subnet UUID for VMaaS ComputeInstance tests. Omit to have tests create and tear down a session VirtualNetwork and Subnet. If VirtualNetworks stay Progressing too long, set this to an existing Ready subnet instead. |
 | `OSAC_SERVICE_ACCOUNT` | `admin` | ServiceAccount for token generation |
 | `OSAC_CLI_PATH` | `osac` | Path to the CLI binary |
 | `TEST` | (none) | pytest `-k` filter — run only tests matching this name substring |

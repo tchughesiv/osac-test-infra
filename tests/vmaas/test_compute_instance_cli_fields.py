@@ -17,9 +17,12 @@ TEST_RUN_STRATEGY: str = "Always"
 TEST_USER_DATA: str = "#cloud-config\npackages:\n  - vim\n"
 
 
-def test_compute_instance_cli_explicit_fields(cli: OsacCLI, grpc: GRPCClient, k8s_hub_client: K8sClient) -> None:
+def test_compute_instance_cli_explicit_fields(
+    cli: OsacCLI, grpc: GRPCClient, k8s_hub_client: K8sClient, compute_instance_subnet: str
+) -> None:
     uuid: str = cli.create_compute_instance(
         template="osac.templates.ocp_virt_vm",
+        subnet=compute_instance_subnet,
         cores=TEST_CORES,
         memory_gib=TEST_MEMORY_GIB,
         boot_disk_size=TEST_BOOT_DISK_SIZE,
@@ -42,6 +45,7 @@ def test_compute_instance_cli_explicit_fields(cli: OsacCLI, grpc: GRPCClient, k8
     )
     assert spec["image"]["sourceRef"] == TEST_IMAGE, f"image.sourceRef mismatch: {spec['image']['sourceRef']}"
     assert spec["runStrategy"] == TEST_RUN_STRATEGY, f"runStrategy mismatch: {spec['runStrategy']}"
+    assert spec["subnet"] == compute_instance_subnet, f"subnet mismatch: {spec.get('subnet')!r}"
 
     expected_secret_name: str = f"{uuid}-user-data"
     assert spec["userDataSecretRef"]["name"] == expected_secret_name, (

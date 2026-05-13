@@ -61,9 +61,14 @@ def _verify_no_duplicate_deprovision(k8s: K8sClient, *, name: str) -> None:
 
 
 def test_compute_instance_delete_during_provision(
-    cli: OsacCLI, grpc: GRPCClient, k8s_hub_client: K8sClient, k8s_virt_client: K8sClient, vm_template: str
+    cli: OsacCLI,
+    grpc: GRPCClient,
+    k8s_hub_client: K8sClient,
+    k8s_virt_client: K8sClient,
+    vm_template: str,
+    compute_instance_subnet: str,
 ) -> None:
-    uuid: str = cli.create_compute_instance(template=vm_template)
+    uuid: str = cli.create_compute_instance(template=vm_template, subnet=compute_instance_subnet)
     ci_name: str = wait_for_cr(k8s=k8s_hub_client, uuid=uuid)
 
     _wait_for_provision_job(k8s_hub_client, name=ci_name)

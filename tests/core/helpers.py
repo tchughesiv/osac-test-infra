@@ -64,12 +64,12 @@ def wait_for_virtual_network_cr(*, k8s: K8sClient, uuid: str) -> str:
     )
 
 
-def wait_for_virtual_network_ready(*, k8s: K8sClient, name: str) -> None:
+def wait_for_virtual_network_ready(*, k8s: K8sClient, name: str, retries: int = 120, delay: int = 5) -> None:
     poll_until(
         fn=lambda: k8s.get_virtual_network_phase(name=name, checked=False),
         until=lambda v: v == "Ready",
-        retries=60,
-        delay=5,
+        retries=retries,
+        delay=delay,
         description=f"{name} VirtualNetwork Ready",
     )
 
@@ -94,12 +94,12 @@ def wait_for_subnet_cr(*, k8s: K8sClient, uuid: str) -> str:
     )
 
 
-def wait_for_subnet_ready(*, k8s: K8sClient, name: str) -> None:
+def wait_for_subnet_ready(*, k8s: K8sClient, name: str, retries: int = 120, delay: int = 5) -> None:
     poll_until(
         fn=lambda: k8s.get_subnet_phase(name=name, checked=False),
         until=lambda v: v == "Ready",
-        retries=60,
-        delay=5,
+        retries=retries,
+        delay=delay,
         description=f"{name} Subnet Ready",
     )
 
