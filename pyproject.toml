@@ -8,6 +8,14 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
 [tool.setuptools.packages.find]
 include = ["tests*"]
 
