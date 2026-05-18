@@ -18,6 +18,7 @@ def test_compute_instance_api_fields(
     k8s_hub_client: K8sClient, k8s_virt_client: K8sClient, namespace: str, compute_instance_subnet: str
 ) -> None:
     instance_name: str = f"e2e-test-api-fields-{int(time.time())}"
+    subnet_cr_name: str = k8s_hub_client.get_subnet_name(uuid=compute_instance_subnet)
 
     manifest: str = yaml.dump(
         {
@@ -26,11 +27,11 @@ def test_compute_instance_api_fields(
             "metadata": {
                 "name": instance_name,
                 "namespace": namespace,
-                "annotations": {"osac.openshift.io/tenant": namespace},
+                "annotations": {"osac.openshift.io/tenant": "shared"},
             },
             "spec": {
                 "templateID": "osac.templates.ocp_virt_vm",
-                "subnet": compute_instance_subnet,
+                "subnetRef": subnet_cr_name,
                 "image": {"sourceType": "registry", "sourceRef": TEST_IMAGE_REF},
                 "cores": TEST_CORES,
                 "memoryGiB": TEST_MEMORY_GIB,

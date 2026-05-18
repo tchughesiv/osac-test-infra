@@ -35,6 +35,7 @@ def test_compute_instance_cli_explicit_fields(
     assert uuid in grpc.list_compute_instance_ids()
 
     ci_name: str = wait_for_cr(k8s=k8s_hub_client, uuid=uuid)
+    subnet_cr_name: str = k8s_hub_client.get_subnet_name(uuid=compute_instance_subnet)
 
     ci_spec: dict[str, Any] = k8s_hub_client.get_json(resource="computeinstance", name=ci_name)
     spec: dict[str, Any] = ci_spec["spec"]
@@ -45,7 +46,11 @@ def test_compute_instance_cli_explicit_fields(
     )
     assert spec["image"]["sourceRef"] == TEST_IMAGE, f"image.sourceRef mismatch: {spec['image']['sourceRef']}"
     assert spec["runStrategy"] == TEST_RUN_STRATEGY, f"runStrategy mismatch: {spec['runStrategy']}"
-    assert spec["subnet"] == compute_instance_subnet, f"subnet mismatch: {spec.get('subnet')!r}"
+    assert spec["subnetRef"] == subnet_cr_name, f"subnetRef mismatch: {spec.get('subnetRef')!r}"
+    subnet_uuid: str = k8s_hub_client.get_json(resource="subnet", name=subnet_cr_name)["metadata"]["labels"][
+        "osac.openshift.io/subnet-uuid"
+    ]
+    assert subnet_uuid == compute_instance_subnet, f"subnet UUID mismatch: {subnet_uuid!r}"
 
     expected_secret_name: str = f"{uuid}-user-data"
     assert spec["userDataSecretRef"]["name"] == expected_secret_name, (
