@@ -64,7 +64,7 @@ jobs:
       result: ${{ steps.test.outcome == 'success' && 'PASSED' || 'FAILED' }}
 
     env:
-      FLAVOR_LOCK: "/tmp/cluster-tool-flavor.lock"
+      FLAVOR_LOCK: "/tmp/cluster-tool-flavor-${{ inputs.flavor-name }}.lock"
 
     steps:
       - name: Set clone name

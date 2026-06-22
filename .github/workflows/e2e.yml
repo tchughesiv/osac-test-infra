@@ -64,7 +64,7 @@ jobs:
       result: ${{ steps.test.outcome == 'success' && 'PASSED' || 'FAILED' }}
 
     env:
-      FLAVOR_LOCK: "/tmp/cluster-tool-flavor.lock"
+      FLAVOR_LOCK: "/tmp/cluster-tool-flavor-${{ inputs.flavor-name }}.lock"
 
     steps:
       - name: Set clone name
@@ -123,6 +123,7 @@ jobs:
       - name: Prepare cluster environment
         env:
           FLAVOR_IMAGE: ${{ inputs.flavor-image }}
+          FLAVOR_NAME: ${{ inputs.flavor-name }}
         run: |
           # --- Ensure cluster-tool is configured ---
           CT_CONFIG="${HOME}/.config/cluster-tool"
@@ -138,20 +139,16 @@ jobs:
             exit 1
           fi
 
-          # --- Pull or update cluster flavor ---
-          # Try non-blocking exclusive lock to pull/update the flavor.
-          # If another job is already pulling, skip — the boot step's
-          # shared lock will wait for it to finish.
-          # flock exit code 1 = lock contention (skip), other = real error.
-          rc=0
-          flock --exclusive --nonblock "${FLAVOR_LOCK}" \
-            sudo python3 /usr/local/bin/cluster-tool pull "${FLAVOR_IMAGE}" \
-            || rc=$?
-          if [[ "${rc}" -eq 1 ]]; then
-            echo "Another job is pulling the flavor — skipping."
-          elif [[ "${rc}" -ne 0 ]]; then
-            echo "ERROR: cluster-tool pull failed (exit ${rc})" >&2
-            exit "${rc}"
+          # --- Pull cluster flavor if missing ---
+          # Check whether the flavor already exists on this server.
+          # Only pull (under exclusive lock) when it's absent.
+          if sudo python3 /usr/local/bin/cluster-tool flavors \
+               | grep -q "^${FLAVOR_NAME} "; then
+            echo "Flavor '${FLAVOR_NAME}' already present — skipping pull."
+          else
+            echo "Flavor '${FLAVOR_NAME}' not found — pulling..."
+            flock --exclusive "${FLAVOR_LOCK}" \
+              sudo python3 /usr/local/bin/cluster-tool pull "${FLAVOR_IMAGE}"
           fi
 
           # --- Clean up stale clone resources ---
