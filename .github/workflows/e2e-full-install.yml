@@ -218,25 +218,6 @@ jobs:
           INSTALLER_REF: ${{ inputs.installer-ref }}
           IMAGE_OVERRIDES: ${{ inputs.image-overrides }}
         run: |
-          # --- Wait for KubeVirt ---
-          echo "Waiting for KubeVirt to be Available..."
-          for attempt in $(seq 1 60); do
-              AVAILABLE=$(oc get hyperconverged kubevirt-hyperconverged -n openshift-cnv \
-                  -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "Unknown")
-              if [[ "${AVAILABLE}" == "True" ]]; then
-                  echo "  KubeVirt Available after $((attempt * 10))s"
-                  break
-              fi
-              if [[ $((attempt % 6)) -eq 0 ]]; then
-                  echo "  [${attempt}0s] KubeVirt not Available yet"
-              fi
-              sleep 10
-          done
-          if [[ "${AVAILABLE}" != "True" ]]; then
-              echo "ERROR: KubeVirt not Available after 600s" >&2
-              exit 1
-          fi
-
           # --- Install prerequisites and deploy ---
           # Ensure helm, yq, and jq are available
           if ! command -v helm &>/dev/null; then
@@ -262,9 +243,9 @@ jobs:
           # (ca-bundle, fulfillment-db, credentials, AAP license), Helm deploy,
           # and post-install (AAP bootstrap, AAP token, hub registration, tenants).
           export DEPLOY_MODE=helm
-          export VALUES_FILE=values/vmaas-ci.yaml
+          export VALUES_FILE=values/vmaas-ci/values.yaml
           export INGRESS_SERVICE=true
-          export VIRT_SERVICE=false
+          export VIRT_SERVICE=true
           export STORAGE_SERVICE=true
           bash scripts/setup.sh
 
