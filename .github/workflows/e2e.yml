@@ -140,36 +140,53 @@ jobs:
           fi
 
           # --- Pull cluster flavor if missing or outdated ---
-          # Compare the remote image digest with the locally stored one.
-          # Pull (under exclusive lock) only when the flavor is absent or
-          # the remote image has been updated since the last pull.
+          # All digest checking and pulling runs inside an exclusive flock
+          # so concurrent jobs serialize. After acquiring the lock we
+          # re-check whether the pull is still needed (another job may
+          # have completed it while we waited).
           DIGEST_FILE="/tmp/cluster-tool-flavor-${FLAVOR_NAME}.digest"
           REMOTE_DIGEST=$(skopeo inspect "docker://${FLAVOR_IMAGE}" --format '{{.Digest}}' 2>/dev/null || echo "")
+
+          exec 9>"${FLAVOR_LOCK}"
+          flock --exclusive 9
+          echo "Acquired flavor lock."
+
           LOCAL_DIGEST=""
           if [[ -f "${DIGEST_FILE}" ]]; then
             LOCAL_DIGEST=$(cat "${DIGEST_FILE}")
           fi
 
+          FLAVOR_EXISTS=false
           if sudo python3 /usr/local/bin/cluster-tool flavors \
                | grep -q "^${FLAVOR_NAME} "; then
+            FLAVOR_EXISTS=true
+          fi
+
+          NEED_PULL=false
+          if ${FLAVOR_EXISTS}; then
             if [[ -n "${REMOTE_DIGEST}" ]] && [[ "${REMOTE_DIGEST}" == "${LOCAL_DIGEST}" ]]; then
               echo "Flavor '${FLAVOR_NAME}' is up to date (digest: ${LOCAL_DIGEST}) — skipping pull."
             elif [[ -n "${REMOTE_DIGEST}" ]]; then
-              echo "Flavor '${FLAVOR_NAME}' exists but image changed (local: ${LOCAL_DIGEST:-none}, remote: ${REMOTE_DIGEST}) — pulling..."
-              flock --exclusive "${FLAVOR_LOCK}" \
-                sudo python3 /usr/local/bin/cluster-tool pull "${FLAVOR_IMAGE}"
-              echo "${REMOTE_DIGEST}" > "${DIGEST_FILE}"
+              echo "Flavor '${FLAVOR_NAME}' exists but image changed (local: ${LOCAL_DIGEST:-none}, remote: ${REMOTE_DIGEST}) — deleting and re-pulling..."
+              sudo python3 /usr/local/bin/cluster-tool flavors --delete "${FLAVOR_NAME}" || true
+              NEED_PULL=true
             else
               echo "Flavor '${FLAVOR_NAME}' already present, could not check remote digest — skipping pull."
             fi
           else
             echo "Flavor '${FLAVOR_NAME}' not found — pulling..."
-            flock --exclusive "${FLAVOR_LOCK}" \
-              sudo python3 /usr/local/bin/cluster-tool pull "${FLAVOR_IMAGE}"
+            NEED_PULL=true
+          fi
+
+          if ${NEED_PULL}; then
+            sudo python3 /usr/local/bin/cluster-tool pull "${FLAVOR_IMAGE}"
             if [[ -n "${REMOTE_DIGEST}" ]]; then
               echo "${REMOTE_DIGEST}" > "${DIGEST_FILE}"
             fi
           fi
+
+          exec 9>&-
+          echo "Released flavor lock."
 
           # --- Clean up stale clone resources ---
           # Destroy any leftover clone from a previous run attempt, then
