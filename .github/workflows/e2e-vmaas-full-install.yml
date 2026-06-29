@@ -471,7 +471,7 @@ jobs:
             helm dependency update charts/osac/
             helm upgrade osac charts/osac/ \
               --namespace "${INSTALLER_NAMESPACE}" \
-              --values "${VALUES_FILE}" \
+              --reuse-values \
               "${SET_ARGS[@]}" \
               --timeout 10m \
               --wait
