@@ -80,10 +80,15 @@ on:
         type: string
         default: ""
       component-containerfile:
-        description: "Path to Containerfile relative to component repo root"
+        description: "Path to Containerfile (or execution-environment.yaml for ansible-builder) relative to component repo root"
         required: false
         type: string
         default: "Containerfile"
+      component-build-type:
+        description: "Build method: 'containerfile' (default) or 'ansible-builder'"
+        required: false
+        type: string
+        default: "containerfile"
     outputs:
       result:
         description: "Test result: PASSED or FAILED"
@@ -297,6 +302,7 @@ jobs:
           COMPONENT_REF: ${{ inputs.component-ref }}
           COMPONENT_FILE: ${{ inputs.component-containerfile }}
           COMPONENT_IMAGE_KEY: ${{ inputs.component-image-key }}
+          COMPONENT_BUILD_TYPE: ${{ inputs.component-build-type }}
         run: |
           # --- Validate component inputs (all-or-none) ---
           if [[ -z "${COMPONENT_REF}" ]] || [[ -z "${COMPONENT_IMAGE_KEY}" ]]; then
@@ -324,9 +330,17 @@ jobs:
           git clone --depth 1 --branch "${COMPONENT_REF}" \
             "https://github.com/${COMPONENT_REPO}.git" "$RUNNER_TEMP/component-src"
 
-          echo "Building image from ${COMPONENT_FILE}..."
-          podman build -t "${COMPONENT_TAG}" \
-            -f "$RUNNER_TEMP/component-src/${COMPONENT_FILE}" "$RUNNER_TEMP/component-src"
+          # --- Build component image ---
+          SRC="$RUNNER_TEMP/component-src"
+          if [[ "${COMPONENT_BUILD_TYPE}" == "ansible-builder" ]]; then
+            echo "Generating build context with ansible-builder from ${COMPONENT_FILE}..."
+            pip install --quiet ansible-builder
+            ansible-builder create --file "${SRC}/${COMPONENT_FILE}"
+            podman build -t "${COMPONENT_TAG}" -f "${SRC}/context/Containerfile" "${SRC}/context"
+          else
+            echo "Building image from ${COMPONENT_FILE}..."
+            podman build -t "${COMPONENT_TAG}" -f "${SRC}/${COMPONENT_FILE}" "${SRC}"
+          fi
 
           # Load image onto the cluster node so CRI-O can use it locally.
           # On RHCOS, root podman and CRI-O share /var/lib/containers/storage,
