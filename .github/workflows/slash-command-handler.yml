@@ -70,7 +70,9 @@ jobs:
         run: |
           FIRST_LINE=$(echo "${COMMENT_BODY}" | head -n1 | xargs)
 
-          if [[ "${FIRST_LINE}" =~ ^/retest ]]; then
+          if [[ "${FIRST_LINE}" =~ ^/ok-to-test([[:space:]]|$) ]]; then
+            echo "command=ok-to-test" >> "$GITHUB_OUTPUT"
+          elif [[ "${FIRST_LINE}" =~ ^/retest ]]; then
             echo "command=retest" >> "$GITHUB_OUTPUT"
           elif [[ "${FIRST_LINE}" =~ ^/cancel[[:space:]]+(.*) ]]; then
             echo "command=cancel:${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
@@ -130,6 +132,7 @@ jobs:
             echo "| \`/test ?\` or \`/test help\` | Show this help |"
             echo "| \`/retest\` | Re-run all failed checks |"
             echo "| \`/cancel [name]\` | Cancel in-progress runs |"
+            echo "| \`/ok-to-test\` | Approve fork PR for E2E testing |"
 
             if jq -e '[.[] | select(.stem | startswith("e2e-"))] | length > 0' /tmp/available.json > /dev/null 2>&1; then
               echo ""
@@ -142,11 +145,47 @@ jobs:
           gh api "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" \
             -f content='rocket'
 
+      - name: Handle ok-to-test
+        if: steps.cmd.outputs.command == 'ok-to-test'
+        env:
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          echo "Adding ok-to-test label to PR #${PR_NUMBER}..."
+
+          # Add the ok-to-test label
+          gh pr edit "${PR_NUMBER}" -R "${REPO}" --add-label "ok-to-test" 2>/dev/null || \
+            gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+              --input - <<< '{"labels":["ok-to-test"]}' --silent
+
+          # Find and approve pending workflow runs for HEAD_SHA
+          APPROVED=0
+          PENDING_RUNS=$(gh api "repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&status=action_required" \
+            --jq '.workflow_runs[].id' 2>/dev/null || true)
+
+          for RUN_ID in ${PENDING_RUNS}; do
+            if gh api "repos/${REPO}/actions/runs/${RUN_ID}/approve" --method POST --silent 2>/dev/null; then
+              APPROVED=$((APPROVED + 1))
+            fi
+          done
+
+          # Post confirmation comment
+          if [[ ${APPROVED} -gt 0 ]]; then
+            MSG="Labeled \`ok-to-test\` and approved ${APPROVED} pending workflow run(s) for \`${HEAD_SHA:0:7}\`."
+          else
+            MSG="Labeled \`ok-to-test\`. No pending workflow runs found to approve — tests will be authorized on next trigger."
+          fi
+          gh pr comment "${PR_NUMBER}" -R "${REPO}" --body "${MSG}"
+
+          # React with checkmark
+          gh api "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content='+1' --silent 2>/dev/null || true
+
       - name: Execute command
         if: >-
           steps.cmd.outputs.command != '?' &&
           steps.cmd.outputs.command != 'help' &&
           steps.cmd.outputs.command != 'retest' &&
+          steps.cmd.outputs.command != 'ok-to-test' &&
           !startsWith(steps.cmd.outputs.command, 'cancel:')
         env:
           COMMAND: ${{ steps.cmd.outputs.command }}

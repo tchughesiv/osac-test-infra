@@ -99,6 +99,11 @@ on:
         required: false
         type: string
         default: ""
+      pr-number:
+        description: "PR number (for label-based authorization check)"
+        required: false
+        type: string
+        default: ""
       notify-on-failure:
         description: "Send Slack notification on failure (typically set for scheduled runs)"
         required: false
@@ -169,7 +174,57 @@ jobs:
           echo "::add-mask::$(cat "${APPROLE_DIR}/secret-id")"
           echo "secret-id=$(cat "${APPROLE_DIR}/secret-id")" >> "$GITHUB_OUTPUT"
 
-      - name: Retrieve secrets from Vault
+      - name: Retrieve GitHub token from Vault
+        id: vault-github
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
+        with:
+          url: http://127.0.0.1:8200
+          method: approle
+          roleId: ${{ steps.approle.outputs.role-id }}
+          secretId: ${{ steps.approle.outputs.secret-id }}
+          exportEnv: false
+          secrets: |
+            secret/data/osac/e2e/github-token token | GH_ORG_TOKEN
+
+      - name: Validate fork PR authorization
+        if: inputs.fork-pr-author-association != ''
+        env:
+          PR_AUTHOR: ${{ inputs.fork-pr-author }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          PR_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ steps.vault-github.outputs.GH_ORG_TOKEN }}
+        run: |
+          # Tier 0: check for ok-to-test label (set by /ok-to-test command)
+          if [[ -n "${PR_NUMBER}" ]]; then
+            HTTP_CODE=$(curl -s -o /tmp/labels.json -w '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${PR_REPO}/issues/${PR_NUMBER}/labels")
+            if [[ "${HTTP_CODE}" == "200" ]]; then
+              if jq -e '[.[].name] | index("ok-to-test")' /tmp/labels.json > /dev/null 2>&1; then
+                echo "Fork PR authorized: 'ok-to-test' label found on PR #${PR_NUMBER}."
+                exit 0
+              fi
+            else
+              echo "::warning::Failed to fetch labels for PR #${PR_NUMBER} (HTTP ${HTTP_CODE}), skipping label check."
+            fi
+          fi
+
+          # Tier 1: check org membership (author_association is unreliable for org members)
+          HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/osac-project/members/${PR_AUTHOR}")
+          if [[ "${HTTP_CODE}" == "204" ]]; then
+            echo "Fork PR authorized: '${PR_AUTHOR}' is an osac-project org member."
+            exit 0
+          fi
+
+          echo "::error::Fork PR blocked: '${PR_AUTHOR}' is not an osac-project org member."
+          echo "::error::An org member can approve this PR for testing by commenting /ok-to-test"
+          exit 1
+
+      - name: Retrieve E2E secrets from Vault
         id: vault
         uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
         with:
@@ -182,46 +237,7 @@ jobs:
             secret/data/osac/e2e/pull-secret dockerconfigjson | PULL_SECRET ;
             secret/data/osac/e2e/aap-license license | AAP_LICENSE ;
             secret/data/osac/e2e/snapshot-registry dockerconfigjson | SNAPSHOT_REGISTRY_AUTH ;
-            secret/data/osac/e2e/slack-webhook-url url | SLACK_WEBHOOK_URL ;
-            secret/data/osac/e2e/github-token token | GH_ORG_TOKEN
-
-      - name: Validate fork PR authorization
-        if: inputs.fork-pr-author-association != ''
-        env:
-          AUTHOR_ASSOCIATION: ${{ inputs.fork-pr-author-association }}
-          PR_AUTHOR: ${{ inputs.fork-pr-author }}
-          GH_TOKEN: ${{ steps.vault.outputs.GH_ORG_TOKEN }}
-        run: |
-          # Tier 1: fast-pass using author_association from webhook (works most of the time)
-          case "${AUTHOR_ASSOCIATION}" in
-            OWNER|MEMBER|COLLABORATOR|CONTRIBUTOR)
-              echo "Fork PR authorized: author_association is ${AUTHOR_ASSOCIATION}."
-              exit 0
-              ;;
-          esac
-
-          # Tier 2: author_association is unreliable ('${AUTHOR_ASSOCIATION}').
-          # Check org membership directly using a Vault-stored token with read:org scope.
-          echo "author_association is '${AUTHOR_ASSOCIATION}', checking org membership for '${PR_AUTHOR}'..."
-          HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/orgs/osac-project/members/${PR_AUTHOR}")
-
-          case "${HTTP_CODE}" in
-            204)
-              echo "Fork PR authorized: '${PR_AUTHOR}' is an osac-project org member."
-              ;;
-            404)
-              echo "::error::Fork PR blocked: '${PR_AUTHOR}' is not an osac-project org member."
-              echo "::error::External contributors need an org member to approve their PR for E2E testing."
-              exit 1
-              ;;
-            *)
-              echo "::error::Org membership check returned unexpected HTTP ${HTTP_CODE} for '${PR_AUTHOR}'."
-              exit 1
-              ;;
-          esac
+            secret/data/osac/e2e/slack-webhook-url url | SLACK_WEBHOOK_URL
 
       - name: Write secrets
         env:
