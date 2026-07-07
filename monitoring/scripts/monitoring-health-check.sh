@@ -41,7 +41,8 @@ check_remote_runner() {
     local label="$1" host="$2" port="$3"
     systemctl --user is-active --quiet "monitoring-tunnel@${host}--${port}.service" || return 1
     local up
-    up=$(curl -sf "http://127.0.0.1:9091/api/v1/query?query=up%7Binstance%3D%22${label}%22%7D" \
+    up=$(curl -sf --connect-timeout 5 --max-time 10 \
+        "http://127.0.0.1:9091/api/v1/query?query=up%7Binstance%3D%22${label}%22%7D" \
         | jq -r '.data.result[0].value[1]' 2>/dev/null)
     [[ "${up}" == "1" ]]
 }

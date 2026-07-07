@@ -79,7 +79,11 @@ registry_upsert() {
     local tmp
     tmp="$(mktemp)"
     touch "${REMOTE_REGISTRY}"
-    { grep -v "^${label} " "${REMOTE_REGISTRY}" || true; echo "${label} ${host} ${port}"; } > "${tmp}"
+    # Exact first-field match via awk, not grep -- a label is a fixed
+    # string, not a regex, and labels may legally contain "." (see the
+    # hostname/label validation regex above), which grep would otherwise
+    # interpret as "match any character" and could touch the wrong entry.
+    { awk -v l="${label}" '$1 != l' "${REMOTE_REGISTRY}"; echo "${label} ${host} ${port}"; } > "${tmp}"
     mv "${tmp}" "${REMOTE_REGISTRY}"
 }
 
@@ -88,7 +92,7 @@ registry_remove() {
     [[ -f "${REMOTE_REGISTRY}" ]] || return 0
     local tmp
     tmp="$(mktemp)"
-    grep -v "^${label} " "${REMOTE_REGISTRY}" > "${tmp}" || true
+    awk -v l="${label}" '$1 != l' "${REMOTE_REGISTRY}" > "${tmp}"
     mv "${tmp}" "${REMOTE_REGISTRY}"
 }
 
