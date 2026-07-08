@@ -2,8 +2,12 @@
 # Installed by monitoring-setup.sh to ~/.config/containers/systemd/grafana.container
 #
 # Deployed on the CENTRAL machine only.
-# Access via: https://<central-host-ip>:3000 (direct HTTPS + GitHub OAuth
-# login -- see GF_SERVER_ROOT_URL below, specific to this deployment's host).
+# Direct HTTPS on :3000. Only ONE host is canonical for GitHub OAuth login
+# at a time -- whichever address GF_SERVER_ROOT_URL below and the GitHub
+# OAuth app's callback URL currently agree on (may be a relay in front of
+# this host rather than the host's own address -- see
+# monitoring/vpn-relay-access.md). Accessing from any other address still
+# reaches the dashboards/API but not a fresh OAuth login.
 #
 # TLS cert/key and the GitHub OAuth client id/secret (.env.grafana) are
 # real credentials, provisioned manually on the central host, never

@@ -103,12 +103,24 @@ them — it doesn't block on them):
    `~/.monitoring-server/certs/grafana.{crt,key}` (Grafana won't start
    without both), and edit `~/.monitoring-server/.env.grafana` with a
    [GitHub OAuth app](https://github.com/organizations/osac-project/settings/applications)'s
-   client id/secret, `GF_SERVER_ROOT_URL=https://<central-host>:3000`, and
+   client id/secret, `GF_SERVER_ROOT_URL=https://<canonical-host>:3000`, and
    an initial `GF_SECURITY_ADMIN_PASSWORD` (only takes effect on Grafana's
    first-ever boot — harmless to keep set afterwards). When creating the
    OAuth app, set its "Authorization callback URL" to
-   `https://<central-host>:3000/login/github` — a mismatch here is the
-   most common cause of a login error on first sign-in.
+   `https://<canonical-host>:3000/login/github`.
+
+   `<canonical-host>` must be **exactly** the one address people actually
+   type into their browser to reach this Grafana instance — `GF_SERVER_ROOT_URL`
+   and the OAuth app's callback URL must always match each other, or login
+   fails with "Missing saved oauth state". If a
+   [relay](vpn-relay-access.md) is in front of the direct `<central-host>`
+   address, the relay's address is the canonical one, and direct
+   `<central-host>` access loses working login (GitHub OAuth Apps only
+   support a single registered callback URL, so only one address can be
+   canonical at a time). This bit both of us in practice: switching the
+   canonical host requires updating the OAuth app's callback URL *first*,
+   then `GF_SERVER_ROOT_URL` — doing it in the other order breaks login from
+   every address until both sides match again.
 
 ### Provisioning a new agent machine
 
@@ -231,6 +243,10 @@ Direct HTTPS on the central machine, GitHub OAuth login restricted to the
 (auto-provisioned into the "OSAC CI" folder): Runner Health, Runner Status,
 Workflow Jobs, Workflow Metrics, and Health Overview (a team-facing summary --
 pass rate trend, flake rate, MTTR -- for standups/sprint reviews, see OSAC-2064).
+
+Also reachable via an internal relay machine instead of the central host's
+public IP -- see [`vpn-relay-access.md`](vpn-relay-access.md) for why and
+how to set one up.
 
 ## Troubleshooting
 
