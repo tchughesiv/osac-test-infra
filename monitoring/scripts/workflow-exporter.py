@@ -1239,6 +1239,116 @@ class WorkflowExporter:
             result.append(wf_data)
         return sorted(result, key=lambda x: x["workflow"])
 
+    def get_flake_rate_json(self, params):
+        """Retry-to-green flake rate per workflow, with the same filters as
+        get_jobs_json (OSAC-2064).
+
+        A stored job row's run_attempt/conclusion always reflect the LATEST
+        attempt (see _upsert_job's run_attempt-guarded upsert) -- so
+        run_attempt > 1 together with conclusion == "success" means the run
+        failed at least once on this exact commit, then passed on a re-run
+        with no code change: a flake, not a real fix. A run that never
+        succeeded (still failing after N attempts) is a real failure, not a
+        flake, and is correctly excluded by only considering
+        conclusion == "success" rows here.
+
+        Returns: [{"workflow": "...", "flaky_passes": N,
+                   "total_successes": N, "flake_rate": 0.xx}, ...]
+        sorted by flake_rate descending (worst offenders first).
+        """
+        jobs = self.get_jobs_json(params)
+        merge = self._parse_grafana_param(params, "merge_similar")
+        use_display = not (merge and merge.lower() in ("true", "yes", "1"))
+        by_wf = {}
+        for job in jobs:
+            if job.get("conclusion") != "success":
+                continue
+            wf = (job.get("display_name") or job.get("workflow", "unknown")
+                  ) if use_display else job.get("workflow", "unknown")
+            entry = by_wf.setdefault(
+                wf, {"workflow": wf, "flaky_passes": 0, "total_successes": 0}
+            )
+            entry["total_successes"] += 1
+            if (job.get("run_attempt") or 1) > 1:
+                entry["flaky_passes"] += 1
+
+        result = []
+        for entry in by_wf.values():
+            entry["flake_rate"] = round(
+                entry["flaky_passes"] / entry["total_successes"], 4
+            )
+            result.append(entry)
+        return sorted(result, key=lambda x: x["flake_rate"], reverse=True)
+
+    def get_mttr_json(self, params):
+        """Per-workflow + overall MTTR, with the same filters as
+        get_jobs_json (OSAC-2064): mean time from a failing run to the next
+        run of that same workflow that succeeds.
+
+        Runs sorted chronologically per workflow; a "failure" opens a
+        recovery window (if one isn't already open), the next "success"
+        closes it and records the elapsed time. Any other conclusion
+        (cancelled, etc.) is skipped over -- it neither starts nor ends a
+        recovery window, since it's neither a real failure nor a fix.
+
+        Returns: {"by_workflow": [{"workflow": "...", "mttr_seconds": N,
+                   "mttr_display": "1h 2m", "num_recoveries": N}, ...]
+                   (sorted by mttr_seconds descending, worst first),
+                   "overall": {...same shape, no "workflow" key...} | None}
+        """
+        jobs = self.get_jobs_json(params)
+        merge = self._parse_grafana_param(params, "merge_similar")
+        use_display = not (merge and merge.lower() in ("true", "yes", "1"))
+        by_wf = {}
+        for job in jobs:
+            wf = (job.get("display_name") or job.get("workflow", "unknown")
+                  ) if use_display else job.get("workflow", "unknown")
+            by_wf.setdefault(wf, []).append(job)
+
+        result = []
+        all_recoveries = []
+        for wf, wf_jobs in by_wf.items():
+            wf_jobs.sort(key=lambda j: j.get("created_at", ""))
+            recoveries = []
+            failed_at = None
+            for job in wf_jobs:
+                c = job.get("conclusion")
+                if c == "failure":
+                    if failed_at is None:
+                        failed_at = job.get("created_at")
+                elif c == "success":
+                    if failed_at is not None:
+                        t0 = datetime.fromisoformat(failed_at.replace("Z", "+00:00"))
+                        t1 = datetime.fromisoformat(
+                            job["created_at"].replace("Z", "+00:00")
+                        )
+                        recoveries.append((t1 - t0).total_seconds())
+                        failed_at = None
+            if recoveries:
+                avg = sum(recoveries) / len(recoveries)
+                result.append({
+                    "workflow": wf,
+                    "mttr_seconds": round(avg),
+                    "mttr_display": WorkflowExporter._fmt_duration(avg),
+                    "num_recoveries": len(recoveries),
+                })
+                all_recoveries.extend(recoveries)
+
+        overall = None
+        if all_recoveries:
+            avg = sum(all_recoveries) / len(all_recoveries)
+            overall = {
+                "mttr_seconds": round(avg),
+                "mttr_display": WorkflowExporter._fmt_duration(avg),
+                "num_recoveries": len(all_recoveries),
+            }
+        return {
+            "by_workflow": sorted(
+                result, key=lambda x: x["mttr_seconds"], reverse=True
+            ),
+            "overall": overall,
+        }
+
     def get_workflows_json(self, params):
         """Return distinct workflow names from the job history.
 
@@ -1360,7 +1470,8 @@ class WorkflowExporter:
 
         Returns: {"success": N, "failure": N, "cancelled": N,
                   "queued": N, "in_progress": N, "total": N,
-                  "failure_rate": 0.xx, "cache_oldest_at": "2026-..." | None}
+                  "failure_rate": 0.xx, "success_rate": 0.xx,
+                  "cache_oldest_at": "2026-..." | None}
         """
         # Reuse the same filtering logic — just count instead of return
         jobs = self.get_jobs_json(params)
@@ -1372,6 +1483,7 @@ class WorkflowExporter:
         success_count = counts.get("success", 0)
         failure_count = counts.get("failure", 0)
         decisive = success_count + failure_count  # exclude cancelled
+        failure_rate = round(failure_count / decisive, 4) if decisive > 0 else 0
         return {
             "success": success_count,
             "failure": failure_count,
@@ -1379,7 +1491,12 @@ class WorkflowExporter:
             "queued": counts.get("queued", 0),
             "in_progress": counts.get("in_progress", 0),
             "total": total,
-            "failure_rate": round(failure_count / decisive, 4) if decisive > 0 else 0,
+            "failure_rate": failure_rate,
+            # For a standup-facing "pass rate" stat panel (OSAC-2064) --
+            # 1 - failure_rate rather than success_count/decisive so the
+            # two rates always sum to exactly 1 (avoids float rounding
+            # drift between two separately-rounded fractions).
+            "success_rate": round(1 - failure_rate, 4) if decisive > 0 else 0,
             # How far back the exporter's in-memory data actually goes,
             # regardless of the query's own filters -- lets the dashboard
             # show "data since: X" instead of implying full coverage of
@@ -1456,6 +1573,28 @@ class ExporterHandler(BaseHTTPRequestHandler):
             params["limit"] = [str(JOBS_HISTORY_MAX_COUNT)]
             counts = self.exporter.get_counts_by_workflow_json(params)
             payload = json.dumps(counts, default=str)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(payload.encode())
+
+        elif parsed.path == "/api/flake-rate":
+            params = parse_qs(parsed.query)
+            params["limit"] = [str(JOBS_HISTORY_MAX_COUNT)]
+            data = self.exporter.get_flake_rate_json(params)
+            payload = json.dumps(data, default=str)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(payload.encode())
+
+        elif parsed.path == "/api/mttr":
+            params = parse_qs(parsed.query)
+            params["limit"] = [str(JOBS_HISTORY_MAX_COUNT)]
+            data = self.exporter.get_mttr_json(params)
+            payload = json.dumps(data, default=str)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")

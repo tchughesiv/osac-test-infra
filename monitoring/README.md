@@ -227,9 +227,10 @@ firing critical alert inhibits warnings for the same `instance`.
 ## Grafana access
 
 Direct HTTPS on the central machine, GitHub OAuth login restricted to the
-`osac-project` org: `https://<central-host>:3000`. Four dashboards
+`osac-project` org: `https://<central-host>:3000`. Five dashboards
 (auto-provisioned into the "OSAC CI" folder): Runner Health, Runner Status,
-Workflow Jobs, Workflow Metrics.
+Workflow Jobs, Workflow Metrics, and Health Overview (a team-facing summary --
+pass rate trend, flake rate, MTTR -- for standups/sprint reviews, see OSAC-2064).
 
 ## Troubleshooting
 
