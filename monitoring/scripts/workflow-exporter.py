@@ -225,21 +225,32 @@ class WorkflowExporter:
             logger.exception("Failed to migrate legacy JSON cache")
 
     def _upsert_job(self, record):
-        """Insert a job record if its id isn't already stored.
+        """Insert a job record, or overwrite it if a row with the same id
+        already exists but with an older run_attempt.
 
-        The id (GitHub run id, globally unique) is the primary key, so this
-        doubles as the dedup check that _seen_run_ids used to provide.
-        Returns True if the row was newly inserted, False if it already
-        existed.
+        A GitHub run keeps the same id across re-runs (e.g. "re-run failed
+        jobs") -- only run_attempt increments and the run's own
+        conclusion/duration/steps change to reflect the latest attempt.
+        Without this, a failed run that's later successfully re-run would
+        leave a permanently stale "failure" row, since the id alone would
+        already look "seen".
+
+        Returns True if a row was inserted or updated, False if an
+        existing row's run_attempt was already >= the incoming one (i.e.
+        nothing changed).
         """
         row = {c: record.get(c) for c in JOB_COLUMNS if c != "steps_json"}
         row["id"] = record.get("id")
         row["steps_json"] = json.dumps(record.get("steps", []))
         placeholders = ", ".join(f":{c}" for c in JOB_COLUMNS)
+        update_clause = ", ".join(
+            f"{c} = excluded.{c}" for c in JOB_COLUMNS if c != "id"
+        )
         with self._db() as conn:
             cur = conn.execute(
-                f"INSERT OR IGNORE INTO jobs ({', '.join(JOB_COLUMNS)}) "
-                f"VALUES ({placeholders})",
+                f"INSERT INTO jobs ({', '.join(JOB_COLUMNS)}) VALUES ({placeholders}) "
+                f"ON CONFLICT(id) DO UPDATE SET {update_clause} "
+                f"WHERE excluded.run_attempt > jobs.run_attempt",
                 row,
             )
             return cur.rowcount > 0
@@ -425,7 +436,7 @@ class WorkflowExporter:
 
         The GitHub API returns completed runs sorted by updated_at descending,
         so the most recently finished runs come first. We fetch 50 per page
-        and rely on _job_exists() to skip already-processed ones.
+        and rely on _needs_upsert() to skip already-processed ones.
         This correctly catches long-running jobs (e.g. created 2h ago,
         just now completed) that a created-time filter would miss.
         """
@@ -454,14 +465,18 @@ class WorkflowExporter:
     def _fetch_run_jobs(self, repo, run_id):
         """Fetch job-level details for a run.
 
-        Returns the raw jobs list from the GitHub API, or [] on error.
+        Returns the raw jobs list from the GitHub API, [] if the run
+        genuinely has no jobs, or None if the fetch itself failed. Callers
+        must treat None as "try again later" -- persisting a record built
+        from a failed fetch would look like a complete, jobless run
+        forever, since a run already stored looks "seen" to _needs_upsert.
         """
         resp = self._get(
             f"{API_URL}/repos/{ORG}/{repo}/actions/runs/{run_id}/jobs"
             f"?filter=latest&per_page=30"
         )
         if not resp.ok:
-            return []
+            return None
         return resp.json().get("jobs", [])
 
     def _extract_failed_steps(self, jobs):
@@ -507,10 +522,171 @@ class WorkflowExporter:
                     pass
         return steps
 
-    def _job_exists(self, run_id):
+    def _needs_upsert(self, run):
+        """Whether `run` (a raw GitHub API run object) is worth fetching
+        job-level details for and upserting -- true if it's not stored at
+        all yet, or if the incoming run_attempt is newer than what's
+        stored (see _upsert_job). False means the stored row is already
+        at least as current as this run, so the caller can skip the extra
+        _fetch_run_jobs API call entirely.
+        """
         with self._db() as conn:
-            row = conn.execute("SELECT 1 FROM jobs WHERE id = ?", (run_id,)).fetchone()
-        return row is not None
+            row = conn.execute(
+                "SELECT run_attempt FROM jobs WHERE id = ?", (run["id"],)
+            ).fetchone()
+        return row is None or run.get("run_attempt", 1) > row[0]
+
+    # GitHub's workflow-runs list endpoint stops paginating around 1000
+    # results regardless of total_count -- a documented REST API list
+    # limit, not specific to this endpoint. A single since-only query for a
+    # high-volume repo silently returns only its most recent ~1000 runs,
+    # truncating the requested window without any error. Stay well under
+    # that with a safety margin before bisecting the date range.
+    BACKFILL_SAFE_RESULT_LIMIT = 900
+
+    def _backfill_page(self, repo, url):
+        """Paginate a single (already narrow enough) runs-list query,
+        upserting every run. Returns (seen, new).
+        """
+        seen = new = 0
+        while url:
+            resp = self._get(url)
+
+            if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
+                reset = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
+                wait = max(reset - time.time(), 0) + 5
+                logger.warning("Rate limit exhausted, sleeping %.0fs until reset", wait)
+                time.sleep(wait)
+                continue  # retry the same url
+
+            if not resp.ok:
+                logger.error("Backfill fetch failed for %s: %s %s",
+                             repo, resp.status_code, resp.text[:200])
+                break
+
+            for run in resp.json().get("workflow_runs", []):
+                run_id = run["id"]
+                seen += 1
+                if not self._needs_upsert(run):
+                    continue
+
+                record = self._make_job_record(run, repo)
+                conclusion = run.get("conclusion") or "unknown"
+                jobs = self._fetch_run_jobs(repo, run_id)
+                if jobs is None:
+                    logger.warning(
+                        "Skipping run %s (%s): job-details fetch failed, will retry next pass",
+                        run_id, repo,
+                    )
+                    continue
+                if jobs:
+                    if conclusion == "failure":
+                        failed = self._extract_failed_steps(jobs)
+                        if failed:
+                            record["failed_step"] = "; ".join(
+                                f["display"] for f in failed
+                            )
+                    record["steps"] = self._extract_step_durations(jobs)
+
+                if self._upsert_job(record):
+                    new += 1
+
+            url = resp.links.get("next", {}).get("url")
+
+        return seen, new
+
+    def _backfill_range(self, repo, since_dt, until_dt):
+        """Fetch completed runs for repo in [since_dt, until_dt), recursing
+        by bisecting the date range whenever a query's total_count would
+        need to paginate past GitHub's ~1000-result list cap. Returns
+        (seen, new).
+        """
+        since_str = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        until_str = until_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = (f"{API_URL}/repos/{ORG}/{repo}/actions/runs"
+               f"?status=completed&per_page=100&created={since_str}..{until_str}")
+
+        probe = self._get(url)
+        if probe.status_code == 403 and probe.headers.get("X-RateLimit-Remaining") == "0":
+            reset = int(probe.headers.get("X-RateLimit-Reset", time.time() + 60))
+            wait = max(reset - time.time(), 0) + 5
+            logger.warning("Rate limit exhausted, sleeping %.0fs until reset", wait)
+            time.sleep(wait)
+            return self._backfill_range(repo, since_dt, until_dt)  # retry whole range
+
+        if not probe.ok:
+            logger.error("Backfill probe failed for %s [%s..%s]: %s %s",
+                         repo, since_str, until_str, probe.status_code, probe.text[:200])
+            return 0, 0
+
+        total_count = probe.json().get("total_count", 0)
+        if total_count > self.BACKFILL_SAFE_RESULT_LIMIT and (until_dt - since_dt) > timedelta(hours=1):
+            mid = since_dt + (until_dt - since_dt) / 2
+            logger.info("%s [%s..%s]: %d runs, bisecting at %s",
+                        repo, since_str, until_str, total_count, mid.isoformat())
+            seen1, new1 = self._backfill_range(repo, since_dt, mid)
+            seen2, new2 = self._backfill_range(repo, mid, until_dt)
+            return seen1 + seen2, new1 + new2
+
+        # Narrow enough range -- paginate normally, reusing the probe
+        # response as the first page instead of refetching it.
+        seen = new = 0
+        for run in probe.json().get("workflow_runs", []):
+            run_id = run["id"]
+            seen += 1
+            if not self._needs_upsert(run):
+                continue
+            record = self._make_job_record(run, repo)
+            conclusion = run.get("conclusion") or "unknown"
+            jobs = self._fetch_run_jobs(repo, run_id)
+            if jobs is None:
+                logger.warning(
+                    "Skipping run %s (%s): job-details fetch failed, will retry next pass",
+                    run_id, repo,
+                )
+                continue
+            if jobs:
+                if conclusion == "failure":
+                    failed = self._extract_failed_steps(jobs)
+                    if failed:
+                        record["failed_step"] = "; ".join(f["display"] for f in failed)
+                record["steps"] = self._extract_step_durations(jobs)
+            if self._upsert_job(record):
+                new += 1
+
+        next_url = probe.links.get("next", {}).get("url")
+        if next_url:
+            more_seen, more_new = self._backfill_page(repo, next_url)
+            seen += more_seen
+            new += more_new
+
+        return seen, new
+
+    def backfill(self, days):
+        """One-off backfill: fetch completed runs from the last `days` days
+        across all monitored repos and upsert them into the DB, bisecting
+        each repo's date range as needed to stay under GitHub's ~1000-
+        result list pagination cap.
+
+        Safe to re-run any number of times -- _upsert_job's INSERT OR
+        IGNORE against the id primary key means already-stored runs are
+        silently skipped, never duplicated. Intended to be invoked directly
+        (BACKFILL_DAYS env var, see main()), not during normal polling.
+        """
+        since_dt = datetime.now(timezone.utc) - timedelta(days=days)
+        until_dt = datetime.now(timezone.utc)
+        repos = REPOS_FILTER if REPOS_FILTER else self.get_active_repos()
+        total_seen = total_new = 0
+
+        for repo in repos:
+            logger.info("Backfilling %s (created >= %s)...", repo, since_dt.isoformat())
+            repo_seen, repo_new = self._backfill_range(repo, since_dt, until_dt)
+            logger.info("%s: %d runs seen, %d newly inserted", repo, repo_seen, repo_new)
+            total_seen += repo_seen
+            total_new += repo_new
+
+        logger.info("Backfill complete: %d runs seen total, %d newly inserted", total_seen, total_new)
+        return total_seen, total_new
 
     def initial_load(self):
         """Seed history from the GitHub API on a genuinely fresh DB.
@@ -542,6 +718,12 @@ class WorkflowExporter:
 
                     # Fetch job-level data for failed steps and step durations
                     jobs = self._fetch_run_jobs(repo, run_id)
+                    if jobs is None:
+                        logger.warning(
+                            "Skipping run %s (%s): job-details fetch failed, will retry next pass",
+                            run_id, repo,
+                        )
+                        continue
                     if jobs:
                         if conclusion == "failure":
                             failed = self._extract_failed_steps(jobs)
@@ -581,10 +763,11 @@ class WorkflowExporter:
 
                 # Track newly completed runs. Checked via a cheap existence
                 # query before spending the extra _fetch_run_jobs API call,
-                # so already-recorded runs don't burn rate-limit budget.
+                # so already-recorded (and not-newer-attempt) runs don't
+                # burn rate-limit budget.
                 for run in self._recent_completed(repo):
                     run_id = run["id"]
-                    if self._job_exists(run_id):
+                    if not self._needs_upsert(run):
                         continue
 
                     conclusion = run.get("conclusion") or "unknown"
@@ -592,6 +775,12 @@ class WorkflowExporter:
 
                     record = self._make_job_record(run, repo)
                     jobs = self._fetch_run_jobs(repo, run_id)
+                    if jobs is None:
+                        logger.warning(
+                            "Skipping run %s (%s): job-details fetch failed, will retry next pass",
+                            run_id, repo,
+                        )
+                        continue
                     failed = []
                     if jobs:
                         if conclusion == "failure":
@@ -603,7 +792,7 @@ class WorkflowExporter:
                         record["steps"] = self._extract_step_durations(jobs)
 
                     if not self._upsert_job(record):
-                        continue  # lost a race with itself -- shouldn't happen, single-threaded polling
+                        continue  # stored row's run_attempt was already current
 
                     completed_runs.labels(
                         org=ORG, repo=repo, workflow=workflow_name, conclusion=conclusion
@@ -670,6 +859,23 @@ class WorkflowExporter:
         return cleaned
 
     @staticmethod
+    def _parse_limit(params, default=200):
+        """Safely parse the `limit` query param.
+
+        Falls back to `default` on anything non-integer (a malformed
+        client request shouldn't produce a 500 from an uncaught
+        ValueError), and clamps the result to [1, JOBS_HISTORY_MAX_COUNT]
+        -- a negative value would otherwise reach SQLite's LIMIT clause,
+        where a negative LIMIT means "no limit" rather than "zero rows".
+        """
+        raw = params.get("limit", [default])[0]
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = default
+        return max(1, min(value, JOBS_HISTORY_MAX_COUNT))
+
+    @staticmethod
     def _normalize_iso(dt_str):
         """Parse an ISO-8601 timestamp (any offset/precision) and re-render
         it as "YYYY-MM-DDTHH:MM:SSZ" -- the exact format the GitHub API (and
@@ -707,7 +913,7 @@ class WorkflowExporter:
         workflow_name_filter = self._parse_grafana_param(params, "workflow_name")
         job_type_filter = self._parse_grafana_param(params, "job_type")
         category_filter = self._parse_grafana_param(params, "category")
-        limit = min(int(params.get("limit", [200])[0]), JOBS_HISTORY_MAX_COUNT)
+        limit = self._parse_limit(params)
         include_active = params.get("active", ["false"])[0].lower() == "true"
 
         # Parse time-range filters — kept as both datetime objects (for the
@@ -1135,6 +1341,16 @@ def main():
         sys.exit(1)
 
     exporter = WorkflowExporter()
+
+    # One-off backfill mode: run to completion and exit, instead of serving
+    # HTTP and polling forever. Intended for manual invocation (e.g. a
+    # throwaway `podman run` against the same DB volume) with a dedicated
+    # token, not as part of the long-running service.
+    backfill_days = os.getenv("BACKFILL_DAYS")
+    if backfill_days:
+        exporter.backfill(int(backfill_days))
+        return
+
     ExporterHandler.exporter = exporter
 
     logger.info("Starting workflow exporter on port %d (poll every %ds)", PORT, POLL_INTERVAL)

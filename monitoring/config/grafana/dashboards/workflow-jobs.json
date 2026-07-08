@@ -869,6 +869,7 @@
       "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "workflow-api" },
       "fieldConfig": {
         "defaults": {
+          "noValue": "No data yet",
           "thresholds": {
             "mode": "absolute",
             "steps": [{ "color": "blue", "value": null }]
