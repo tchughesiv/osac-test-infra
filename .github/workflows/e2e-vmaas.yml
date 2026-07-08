@@ -319,9 +319,19 @@ jobs:
             curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
           fi
           if ! command -v yq &>/dev/null; then
-            sudo curl -fsSL -o /usr/local/bin/yq \
-              "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64"
-            sudo chmod +x /usr/local/bin/yq
+            # Pinned version + checksum verification, installed to a
+            # runner-owned directory -- no sudo needed, and no risk of
+            # trusting an unverified binary on the system PATH.
+            YQ_VERSION="v4.53.3"
+            YQ_SHA256="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"
+            YQ_DIR="${RUNNER_TEMP}/bin"
+            mkdir -p "${YQ_DIR}"
+            curl -fsSL -o "${YQ_DIR}/yq" \
+              "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+            echo "${YQ_SHA256}  ${YQ_DIR}/yq" | sha256sum -c -
+            chmod +x "${YQ_DIR}/yq"
+            export PATH="${YQ_DIR}:${PATH}"
+            echo "${YQ_DIR}" >> "$GITHUB_PATH"
           fi
 
           INSTALLER_DIR="$RUNNER_TEMP/osac-installer"
