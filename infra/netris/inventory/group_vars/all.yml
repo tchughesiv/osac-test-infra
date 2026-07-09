@@ -90,7 +90,7 @@ aws_secret_access_key: "{{ lookup('ini', 'aws_secret_access_key section=default 
 aws_region: "{{ lookup('ini', 'aws_region section=default file=' + config_path, errors='ignore') | default(lookup('env', 'AWS_DEFAULT_REGION'), true) | default('us-east-1', true) }}"
 
 # CaaS OCP Version
-caas_ocp_version: "4.19"
+caas_ocp_version: "4.22"
 caas_release_image: "quay.io/openshift-release-dev/ocp-release:{{ caas_ocp_version }}.0-multi"
 
 # CaaS Discovery (boot remaining servers with discovery ISO)
