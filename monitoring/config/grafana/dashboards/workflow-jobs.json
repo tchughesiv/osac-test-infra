@@ -1036,10 +1036,10 @@
         "label": "Merge Similar",
         "type": "custom",
         "query": "No,Yes",
-        "current": { "text": "No", "value": "No", "selected": true },
+        "current": { "text": "Yes", "value": "Yes", "selected": true },
         "options": [
-          { "text": "No", "value": "No", "selected": true },
-          { "text": "Yes", "value": "Yes", "selected": false }
+          { "text": "No", "value": "No", "selected": false },
+          { "text": "Yes", "value": "Yes", "selected": true }
         ],
         "includeAll": false,
         "multi": false,

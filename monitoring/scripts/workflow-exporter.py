@@ -118,14 +118,27 @@ api_remaining = Gauge(
 # Exporter logic
 # ---------------------------------------------------------------------------
 class WorkflowExporter:
-    # Ordered category mapping — first match wins (case-insensitive substring)
+    # Ordered category mapping — first match wins (case-insensitive substring).
+    # automation and release are both checked before the broad "ci" catch-all
+    # (test/check/build): automation so bot-maintenance workflows like
+    # "Remove ok-to-test on new push" don't get caught by ci's "test"
+    # pattern, release so "Build container image" matches "container image"
+    # instead of ci's generic "build" pattern.
     WORKFLOW_CATEGORIES = {
         "e2e":        ["e2e"],
         "lint":       ["pre-commit", "lint", "checklist", "kustomize", "check image"],
-        "ci":         ["ci", "test", "check", "build"],
+        "automation": ["bump", "dependabot", "copilot", "slash", "ok-to-test"],
         "release":    ["publish", "container image", "mirror"],
-        "automation": ["bump", "dependabot", "copilot", "slash"],
+        "ci":         ["ci", "test", "check", "build"],
     }
+
+    # GitHub Actions synthetic "workflow runs" that aren't real CI: e.g. the
+    # Dependency Graph's auto-generated "Configured Graph Update: ... #<id>"
+    # entries (actor dependabot[bot], event "dynamic"). Each has a unique
+    # auto-generated name embedding a numeric ID, so it can never be merged
+    # with anything else -- left unfiltered, every one of these becomes a
+    # permanent single-occurrence entry bloating every workflow-grouped panel.
+    IGNORED_EVENTS = {"dynamic"}
 
     @staticmethod
     def _categorize_workflow(name):
@@ -201,6 +214,53 @@ class WorkflowExporter:
                     conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT DEFAULT ''")
         self._migrate_json_cache_if_needed()
         self._backfill_pr_data_from_legacy_cache()
+        self._purge_ignored_events_if_needed()
+        self._recategorize_jobs_if_needed()
+
+    def _purge_ignored_events_if_needed(self):
+        """One-time cleanup of already-stored jobs whose event is now in
+        IGNORED_EVENTS (e.g. GitHub's Dependency Graph auto-submission runs,
+        event "dynamic") -- these were persisted before that filter existed
+        at ingestion time, and each has a unique auto-generated name that
+        permanently bloats every workflow-grouped panel. Safe to re-run:
+        no-op once they're gone.
+        """
+        placeholders = ", ".join("?" for _ in self.IGNORED_EVENTS)
+        with self._db() as conn:
+            cur = conn.execute(
+                f"DELETE FROM jobs WHERE event IN ({placeholders})",
+                tuple(self.IGNORED_EVENTS),
+            )
+            if cur.rowcount:
+                logger.info(
+                    "Purged %d stored job(s) with now-ignored event type(s) %s",
+                    cur.rowcount, sorted(self.IGNORED_EVENTS),
+                )
+
+    def _recategorize_jobs_if_needed(self):
+        """Re-apply _categorize_workflow to already-stored jobs.
+
+        Category is computed once at insert time and stored, so a
+        WORKFLOW_CATEGORIES change (e.g. checking automation before the
+        broad "ci" catch-all) only affects new rows unless existing ones
+        are re-walked here. Safe to re-run every startup: no-op once every
+        row's stored category already matches what _categorize_workflow
+        would assign today.
+        """
+        with self._db() as conn:
+            rows = conn.execute("SELECT id, workflow, category FROM jobs").fetchall()
+            updated = 0
+            for row in rows:
+                correct = self._categorize_workflow(row["workflow"])
+                if correct != row["category"]:
+                    conn.execute(
+                        "UPDATE jobs SET category = ? WHERE id = ?", (correct, row["id"])
+                    )
+                    updated += 1
+            if updated:
+                logger.info(
+                    "Recategorized %d job(s) after a WORKFLOW_CATEGORIES change", updated
+                )
 
     def _migrate_json_cache_if_needed(self):
         """One-time import of the legacy JSON cache into the new DB.
@@ -578,6 +638,8 @@ class WorkflowExporter:
             )
             if resp.ok:
                 for run in resp.json().get("workflow_runs", []):
+                    if run.get("event") in WorkflowExporter.IGNORED_EVENTS:
+                        continue
                     runs.append(self._make_job_record(run, repo))
         return runs
 
@@ -715,6 +777,8 @@ class WorkflowExporter:
                 break
 
             for run in resp.json().get("workflow_runs", []):
+                if run.get("event") in WorkflowExporter.IGNORED_EVENTS:
+                    continue
                 run_id = run["id"]
                 seen += 1
                 if not self._needs_upsert(run):
@@ -782,6 +846,8 @@ class WorkflowExporter:
         # response as the first page instead of refetching it.
         seen = new = 0
         for run in probe.json().get("workflow_runs", []):
+            if run.get("event") in WorkflowExporter.IGNORED_EVENTS:
+                continue
             run_id = run["id"]
             seen += 1
             if not self._needs_upsert(run):
@@ -864,6 +930,8 @@ class WorkflowExporter:
         for repo in repos:
             try:
                 for run in self._fetch_recent_history(repo):
+                    if run.get("event") in WorkflowExporter.IGNORED_EVENTS:
+                        continue
                     run_id = run["id"]
                     record = self._make_job_record(run, repo)
                     conclusion = run.get("conclusion") or "unknown"
@@ -922,6 +990,8 @@ class WorkflowExporter:
                 # so already-recorded (and not-newer-attempt) runs don't
                 # burn rate-limit budget.
                 for run in self._recent_completed(repo):
+                    if run.get("event") in WorkflowExporter.IGNORED_EVENTS:
+                        continue
                     run_id = run["id"]
                     if not self._needs_upsert(run):
                         continue
