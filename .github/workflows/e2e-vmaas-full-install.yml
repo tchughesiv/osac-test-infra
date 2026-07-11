@@ -399,7 +399,10 @@ jobs:
           INSTALLER_REF: ${{ inputs.installer-ref }}
           INSTALLER_REPO: ${{ inputs.installer-repo }}
         run: |
-          # Ensure helm, yq, and jq are available (setup.sh requires helm)
+          # Ensure helm and yq are available (setup.sh requires helm). jq is
+          # not handled here -- machine-init.sh's install_packages step
+          # already installs it during machine provisioning, and github-runner's
+          # sudo is scoped to CI's actual needs, not open-ended package installs.
           if ! command -v helm &>/dev/null; then
             curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
           fi
@@ -417,9 +420,6 @@ jobs:
             chmod +x "${YQ_DIR}/yq"
             export PATH="${YQ_DIR}:${PATH}"
             echo "${YQ_DIR}" >> "$GITHUB_PATH"
-          fi
-          if ! command -v jq &>/dev/null; then
-            sudo dnf install -y jq || sudo apt-get install -y jq
           fi
 
           # Clone osac-installer (reused by the next step)
