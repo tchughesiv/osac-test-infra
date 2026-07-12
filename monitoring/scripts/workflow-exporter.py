@@ -65,7 +65,7 @@ JOB_COLUMNS = [
     "pr_url", "pr_display", "status",
     "conclusion", "event", "trigger", "duration_s", "duration", "actor",
     "url", "created_at", "updated_at", "run_number", "run_attempt",
-    "failed_step", "steps_json",
+    "failed_step", "steps_json", "failure_reason",
 ]
 
 # ---------------------------------------------------------------------------
@@ -140,6 +140,47 @@ class WorkflowExporter:
     # permanent single-occurrence entry bloating every workflow-grouped panel.
     IGNORED_EVENTS = {"dynamic"}
 
+    # Steps in e2e-vmaas-full-install.yml's `e2e` job that are infra
+    # setup/teardown, not the actual product/test path -- a failure here
+    # means CI broke, not that OSAC broke. Used to classify presubmit
+    # failures into failure_reason "infra" vs "test" (see
+    # _classify_failure_reason). "Set up job" is GitHub Actions' own
+    # auto-injected first step, not something in our YAML.
+    INFRA_STEPS = frozenset({
+        "Set up job",
+        "Checkout repository",
+        "Validate and bootstrap",
+        "Authorize fork PR",
+        "Fetch and write secrets",
+        "Prepare cluster environment",
+        "Boot cluster clone",
+        "Teardown",
+    })
+
+    @staticmethod
+    def _classify_failure_reason(category, failed_steps):
+        """category: only "e2e" jobs get classified -- INFRA_STEPS matches
+        e2e-vmaas-full-install.yml's specific step names, several of which
+        (e.g. "Checkout repository", "Teardown") are generic names other
+        repos' non-e2e workflows also happen to use, so applying this
+        outside e2e would misclassify those as infra failures. Returns
+        "n/a" for any other category.
+
+        failed_steps: the list from _extract_failed_steps
+        ([{"display":.., "step":..}, ...]). Returns "infra" if any failed
+        step is in INFRA_STEPS, "test" if there's failure detail but none
+        of it is an infra step, "unknown" if there's no per-step detail at
+        all (e.g. cancelled/startup_failure runs with no steps recorded).
+        """
+        if category != "e2e":
+            return "n/a"
+        if not failed_steps:
+            return "unknown"
+        for f in failed_steps:
+            if f["step"] in WorkflowExporter.INFRA_STEPS:
+                return "infra"
+        return "test"
+
     @staticmethod
     def _categorize_workflow(name):
         """Categorize a workflow name using substring matching.
@@ -209,13 +250,27 @@ class WorkflowExporter:
             # schema, so a DB from before pr_url/pr_display existed needs
             # an explicit migration.
             existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
-            for col in ("pr_url", "pr_display"):
+            for col in ("pr_url", "pr_display", "failure_reason"):
                 if col not in existing_cols:
                     conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT DEFAULT ''")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pr_merges (
+                    id INTEGER PRIMARY KEY,
+                    repo TEXT,
+                    number INTEGER,
+                    title TEXT,
+                    author TEXT,
+                    created_at TEXT,
+                    merged_at TEXT,
+                    merge_seconds INTEGER
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_pr_merges_merged_at ON pr_merges(merged_at)")
         self._migrate_json_cache_if_needed()
         self._backfill_pr_data_from_legacy_cache()
         self._purge_ignored_events_if_needed()
         self._recategorize_jobs_if_needed()
+        self._reclassify_failure_reasons_if_needed()
 
     def _purge_ignored_events_if_needed(self):
         """One-time cleanup of already-stored jobs whose event is now in
@@ -260,6 +315,39 @@ class WorkflowExporter:
             if updated:
                 logger.info(
                     "Recategorized %d job(s) after a WORKFLOW_CATEGORIES change", updated
+                )
+
+    def _reclassify_failure_reasons_if_needed(self):
+        """One-time backfill of failure_reason for already-stored failed jobs.
+
+        failure_reason is computed at ingestion time from live per-step API
+        data (_classify_failure_reason), but rows stored before this field
+        existed only have the already-flattened `failed_step` text ("job ->
+        step; job2 -> step2"). Re-parses that stored text (no GitHub API
+        calls needed) so existing history gets classified too, not just new
+        rows. Safe to re-run: no-op once every failed row already has a
+        failure_reason.
+        """
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT id, category, failed_step FROM jobs "
+                "WHERE conclusion = 'failure' AND (failure_reason IS NULL OR failure_reason = '')"
+            ).fetchall()
+            updated = 0
+            for row in rows:
+                steps = [
+                    {"step": entry.split(" → ")[-1]}
+                    for entry in (row["failed_step"] or "").split("; ")
+                    if entry
+                ]
+                reason = self._classify_failure_reason(row["category"], steps)
+                conn.execute(
+                    "UPDATE jobs SET failure_reason = ? WHERE id = ?", (reason, row["id"])
+                )
+                updated += 1
+            if updated:
+                logger.info(
+                    "Backfilled failure_reason for %d already-stored failed job(s)", updated
                 )
 
     def _migrate_json_cache_if_needed(self):
@@ -380,6 +468,22 @@ class WorkflowExporter:
                 (JOBS_HISTORY_MAX_COUNT,),
             )
 
+    def _prune_pr_merges(self):
+        """Evict merged-PR records older than JOBS_HISTORY_DAYS (same
+        retention window as jobs), then enforce JOBS_HISTORY_MAX_COUNT as a
+        disk safety net -- same pattern as _prune_jobs, keyed on merged_at
+        instead of created_at since "how far back does PR merge-time data
+        go" is what matters for this table.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=JOBS_HISTORY_DAYS)).isoformat()
+        with self._db() as conn:
+            conn.execute("DELETE FROM pr_merges WHERE merged_at < ?", (cutoff,))
+            conn.execute(
+                "DELETE FROM pr_merges WHERE id NOT IN "
+                "(SELECT id FROM pr_merges ORDER BY merged_at DESC LIMIT ?)",
+                (JOBS_HISTORY_MAX_COUNT,),
+            )
+
     def get_cache_coverage(self):
         """Return the oldest job's created_at in the DB -- how far back the
         exporter's data actually goes, independent of any dashboard query
@@ -476,6 +580,8 @@ class WorkflowExporter:
                                     num,
                                     f"https://github.com/{ORG}/{repo}/pull/{num}",
                                 )
+                            if state == "closed" and pr.get("merged_at"):
+                                self._upsert_pr_merge(repo, pr)
                 except Exception:
                     logger.debug("Failed to fetch PRs for %s/%s", repo, state)
             pr_map[repo] = mapping
@@ -488,6 +594,37 @@ class WorkflowExporter:
         """Look up PR number and URL from the branch->PR map."""
         mapping = self._pr_map.get(repo, {})
         return mapping.get(branch, (None, ""))
+
+    def _upsert_pr_merge(self, repo, pr):
+        """Persist a merged PR's open-to-merge time into pr_merges.
+
+        Piggybacks on _refresh_pr_map's existing per-repo "closed" PR fetch
+        (already polled every cycle for the branch->PR map) -- no extra
+        API calls. Keyed by the PR's GitHub-global `id` (stable, unique
+        across repos), so this is naturally idempotent across polls.
+        """
+        try:
+            created = datetime.fromisoformat(pr["created_at"].replace("Z", "+00:00"))
+            merged = datetime.fromisoformat(pr["merged_at"].replace("Z", "+00:00"))
+        except (ValueError, TypeError, KeyError):
+            return
+        merge_seconds = max(0, round((merged - created).total_seconds()))
+        with self._db() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO pr_merges "
+                "(id, repo, number, title, author, created_at, merged_at, merge_seconds) "
+                "VALUES (:id, :repo, :number, :title, :author, :created_at, :merged_at, :merge_seconds)",
+                {
+                    "id": pr["id"],
+                    "repo": repo,
+                    "number": pr.get("number"),
+                    "title": pr.get("title", ""),
+                    "author": pr.get("user", {}).get("login", ""),
+                    "created_at": pr["created_at"],
+                    "merged_at": pr["merged_at"],
+                    "merge_seconds": merge_seconds,
+                },
+            )
 
     def _backfill_missing_pr_data(self):
         """One-time catch-up pass: fill pr_url/pr_display for already-stored
@@ -796,6 +933,7 @@ class WorkflowExporter:
                 if jobs:
                     if conclusion == "failure":
                         failed = self._extract_failed_steps(jobs)
+                        record["failure_reason"] = self._classify_failure_reason(record.get("category", ""), failed)
                         if failed:
                             record["failed_step"] = "; ".join(
                                 f["display"] for f in failed
@@ -864,6 +1002,7 @@ class WorkflowExporter:
             if jobs:
                 if conclusion == "failure":
                     failed = self._extract_failed_steps(jobs)
+                    record["failure_reason"] = self._classify_failure_reason(record.get("category", ""), failed)
                     if failed:
                         record["failed_step"] = "; ".join(f["display"] for f in failed)
                 record["steps"] = self._extract_step_durations(jobs)
@@ -947,6 +1086,7 @@ class WorkflowExporter:
                     if jobs:
                         if conclusion == "failure":
                             failed = self._extract_failed_steps(jobs)
+                            record["failure_reason"] = self._classify_failure_reason(record.get("category", ""), failed)
                             if failed:
                                 record["failed_step"] = "; ".join(
                                     f["display"] for f in failed
@@ -962,6 +1102,7 @@ class WorkflowExporter:
 
     def collect(self):
         self._prune_jobs()
+        self._prune_pr_merges()
         repos = REPOS_FILTER if REPOS_FILTER else self.get_active_repos()
         self._refresh_pr_map(repos)
         if not self._pr_backfill_done:
@@ -1011,6 +1152,7 @@ class WorkflowExporter:
                     if jobs:
                         if conclusion == "failure":
                             failed = self._extract_failed_steps(jobs)
+                            record["failure_reason"] = self._classify_failure_reason(record.get("category", ""), failed)
                             if failed:
                                 record["failed_step"] = "; ".join(
                                     f["display"] for f in failed
@@ -1132,6 +1274,9 @@ class WorkflowExporter:
           since     - ISO 8601 timestamp, only return jobs created at or after
           until     - ISO 8601 timestamp, only return jobs created before
           job_type  - periodic, presubmit, or manual
+          failure_reason - infra, test, or unknown (only meaningful
+                      together with status=failure; see
+                      _classify_failure_reason)
           search    - free-text substring match across workflow, repo,
                       trigger, branch, PR, display name, and actor
         """
@@ -1141,6 +1286,7 @@ class WorkflowExporter:
         workflow_name_filter = self._parse_grafana_param(params, "workflow_name")
         job_type_filter = self._parse_grafana_param(params, "job_type")
         category_filter = self._parse_grafana_param(params, "category")
+        failure_reason_filter = self._parse_grafana_param(params, "failure_reason")
         search_filter = self._parse_grafana_param(params, "search")
         search_lower = search_filter.lower() if search_filter else None
         limit = self._parse_limit(params)
@@ -1187,6 +1333,9 @@ class WorkflowExporter:
         if category_filter:
             where.append("LOWER(category) = :category")
             args["category"] = category_filter.lower()
+        if failure_reason_filter:
+            where.append("LOWER(failure_reason) = :failure_reason")
+            args["failure_reason"] = failure_reason_filter.lower()
         if wf_filters:
             where.append("(" + " OR ".join(
                 f"LOWER(workflow) LIKE :wf{i}" for i in range(len(wf_filters))
@@ -1574,6 +1723,129 @@ class WorkflowExporter:
             "cache_oldest_at": self.get_cache_coverage(),
         }
 
+    def get_presubmit_infra_failures_json(self, params):
+        """Break down failed jobs by failure_reason, with the same filters
+        as get_jobs_json -- callers typically pass
+        job_type=presubmit&category=e2e&since=... to ask "of presubmit e2e
+        failures in this window, how many were CI's fault (infra) vs the
+        product's (test)?", but any filter combination works.
+
+        infra failures are further broken out by which specific step
+        failed (failure_reason alone only says infra/test/unknown, not
+        which step) by re-parsing each job's stored `failed_step` text.
+
+        Returns: {"infra_by_step": [{"step": "...", "count": N}, ...]
+                  (sorted by count descending), "infra_total": N,
+                  "test_total": N, "unattributed_total": N,
+                  "total_failures": N}
+        """
+        params = dict(params)
+        params["status"] = ["failure"]
+        jobs = self.get_jobs_json(params)
+
+        infra_by_step = {}
+        infra_total = test_total = unattributed_total = 0
+        for job in jobs:
+            reason = job.get("failure_reason") or "unknown"
+            if reason == "infra":
+                infra_total += 1
+                for entry in (job.get("failed_step") or "").split("; "):
+                    if not entry:
+                        continue
+                    step = entry.split(" → ")[-1]
+                    if step in self.INFRA_STEPS:
+                        infra_by_step[step] = infra_by_step.get(step, 0) + 1
+            elif reason == "test":
+                test_total += 1
+            else:
+                unattributed_total += 1
+
+        return {
+            "infra_by_step": sorted(
+                (
+                    {"step": step, "count": count}
+                    for step, count in infra_by_step.items()
+                ),
+                key=lambda x: x["count"],
+                reverse=True,
+            ),
+            "infra_total": infra_total,
+            "test_total": test_total,
+            "unattributed_total": unattributed_total,
+            "total_failures": len(jobs),
+        }
+
+    def get_pr_merge_time_json(self, params):
+        """Average PR open-to-merge time, filtered by when the PR was
+        *merged* (not opened) -- "avg time to merge in the past week" means
+        the merge event fell in that window, regardless of how old the PR
+        itself was.
+
+        Query params: since, until (ISO 8601, compared against merged_at),
+        repo (optional, exact match).
+
+        Returns: {"avg_merge_seconds": N, "avg_merge_display": "Xh Ym",
+                  "count": N, "by_repo": [{"repo":.., "avg_merge_seconds":..,
+                  "avg_merge_display":.., "count":..}, ...]}
+        """
+        repo_filter = self._parse_grafana_param(params, "repo")
+        since_str = params.get("since", [None])[0]
+        until_str = params.get("until", [None])[0]
+
+        where = []
+        args = {}
+        if repo_filter:
+            where.append("repo = :repo")
+            args["repo"] = repo_filter
+        # Same try/except-around-_normalize_iso convention as get_jobs_json --
+        # a malformed since/until shouldn't 500 the endpoint, just be ignored.
+        if since_str:
+            try:
+                args["since"] = self._normalize_iso(since_str)
+                where.append("merged_at >= :since")
+            except (ValueError, TypeError):
+                pass
+        if until_str:
+            try:
+                args["until"] = self._normalize_iso(until_str)
+                where.append("merged_at < :until")
+            except (ValueError, TypeError):
+                pass
+
+        sql = "SELECT repo, merge_seconds FROM pr_merges"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+
+        with self._db() as conn:
+            rows = conn.execute(sql, args).fetchall()
+
+        def avg_seconds(values):
+            return round(sum(values) / len(values)) if values else 0
+
+        all_seconds = [r["merge_seconds"] for r in rows]
+        by_repo_seconds = {}
+        for r in rows:
+            by_repo_seconds.setdefault(r["repo"], []).append(r["merge_seconds"])
+
+        avg = avg_seconds(all_seconds)
+        return {
+            "avg_merge_seconds": avg,
+            "avg_merge_display": self._fmt_duration(avg),
+            "count": len(rows),
+            "by_repo": sorted(
+                (
+                    {
+                        "repo": repo,
+                        "avg_merge_seconds": avg_seconds(seconds),
+                        "avg_merge_display": self._fmt_duration(avg_seconds(seconds)),
+                        "count": len(seconds),
+                    }
+                    for repo, seconds in by_repo_seconds.items()
+                ),
+                key=lambda x: x["repo"],
+            ),
+        }
+
 
 # ---------------------------------------------------------------------------
 # Custom HTTP handler: /metrics + /api/jobs
@@ -1610,6 +1882,27 @@ class ExporterHandler(BaseHTTPRequestHandler):
             params["active"] = ["true"]
             counts = self.exporter.get_counts_json(params)
             payload = json.dumps(counts, default=str)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(payload.encode())
+
+        elif parsed.path == "/api/presubmit-infra-failures":
+            params = parse_qs(parsed.query)
+            params["limit"] = [str(JOBS_HISTORY_MAX_COUNT)]
+            breakdown = self.exporter.get_presubmit_infra_failures_json(params)
+            payload = json.dumps(breakdown, default=str)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(payload.encode())
+
+        elif parsed.path == "/api/pr-merge-time":
+            params = parse_qs(parsed.query)
+            merge_time = self.exporter.get_pr_merge_time_json(params)
+            payload = json.dumps(merge_time, default=str)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")

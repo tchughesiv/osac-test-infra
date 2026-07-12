@@ -1,0 +1,61 @@
+---
+name: CI daily digest
+
+# Posts a daily Slack summary of OSAC CI health (periodic E2E success rate,
+# presubmit infra-vs-test failure breakdown, avg PR time-to-merge, and a
+# few bonus stability signals) via the workflow-exporter's JSON API.
+#
+# Must run on the monitoring-central runner (osac-ci-1 itself) -- the
+# exporter only binds 127.0.0.1:9103, same constraint as
+# deploy-monitoring.yml. No pull_request trigger, same reasoning as
+# deploy-monitoring.yml/validate-monitoring.yml's split: keeps this out of
+# every PR's checks list.
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  digest:
+    runs-on: monitoring-central
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      # --- Secret bootstrap (same pattern as deploy-monitoring.yml) ---
+      - name: Read AppRole credentials
+        id: approle
+        run: |
+          APPROLE_DIR="${HOME}/.vault-server/.approle"
+          echo "role-id=$(cat "${APPROLE_DIR}/role-id")" >> "$GITHUB_OUTPUT"
+          echo "::add-mask::$(cat "${APPROLE_DIR}/secret-id")"
+          echo "secret-id=$(cat "${APPROLE_DIR}/secret-id")" >> "$GITHUB_OUTPUT"
+
+      - name: Retrieve secrets from Vault
+        id: vault
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
+        with:
+          url: http://127.0.0.1:8200
+          method: approle
+          roleId: ${{ steps.approle.outputs.role-id }}
+          secretId: ${{ steps.approle.outputs.secret-id }}
+          exportEnv: false
+          secrets: |
+            secret/data/osac/monitoring/slack-webhook-url url | SLACK_WEBHOOK_URL
+
+      # post-ci-digest.py runs directly on the runner host (not in the
+      # workflow-exporter's container), so its one third-party dependency
+      # isn't already present -- same pattern as e2e-vmaas-full-install.yml's
+      # ansible-builder install for a host-run step.
+      - name: Install Python dependencies
+        run: python3 -m pip install --quiet requests
+
+      - name: Post CI digest
+        env:
+          SLACK_WEBHOOK_URL: ${{ steps.vault.outputs.SLACK_WEBHOOK_URL }}
+        run: python3 monitoring/scripts/post-ci-digest.py

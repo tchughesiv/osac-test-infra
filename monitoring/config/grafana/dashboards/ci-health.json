@@ -241,6 +241,101 @@
           ]
         }
       ]
+    },
+    {
+      "title": "Avg Time to Merge",
+      "description": "Average time from PR open to merge, for PRs merged within the selected time range (filtered by merge time, not open time). Not affected by the Category/Workflow/Job Type filters, which don't apply to PRs -- only Repository does.",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 17 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "workflow-api" },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No merged PRs",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "blue", "value": null }]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "http://127.0.0.1:9103/api/pr-merge-time?repo=${repo_filter}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "",
+          "columns": [
+            { "selector": "avg_merge_display", "text": "avg_merge_display", "type": "string" }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Time to Merge by Repo",
+      "description": "Per-repo average time to merge, for PRs merged within the selected time range. Click column headers to sort.",
+      "type": "table",
+      "gridPos": { "h": 4, "w": 16, "x": 8, "y": 17 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "workflow-api" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "repo" },
+            "properties": [
+              { "id": "displayName", "value": "Repository" },
+              { "id": "custom.width", "value": 220 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "avg_merge_display" },
+            "properties": [
+              { "id": "displayName", "value": "Avg Time to Merge" },
+              { "id": "custom.width", "value": 160 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "count" },
+            "properties": [
+              { "id": "displayName", "value": "PRs Merged" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "avg_merge_seconds" },
+            "properties": [{ "id": "custom.hidden", "value": true }]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "avg_merge_seconds", "desc": true }],
+        "footer": { "show": false }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "http://127.0.0.1:9103/api/pr-merge-time?repo=${repo_filter}&since=${__from:date:iso}&until=${__to:date:iso}",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "by_repo",
+          "columns": [
+            { "selector": "repo", "text": "repo", "type": "string" },
+            { "selector": "avg_merge_display", "text": "avg_merge_display", "type": "string" },
+            { "selector": "count", "text": "count", "type": "number" },
+            { "selector": "avg_merge_seconds", "text": "avg_merge_seconds", "type": "number" }
+          ]
+        }
+      ]
     }
   ],
   "schemaVersion": 39,
