@@ -142,6 +142,56 @@
   delay: 30
   when: _prepull_images | length > 0
 
+- name: Disable EDA in AAP platform CR (OSAC-1624 removed EDA)
+  ansible.builtin.shell:
+    cmd: |
+      if oc get ansibleautomationplatform osac-aap -n {{ snapshot_osac_namespace }} >/dev/null 2>&1; then
+        oc patch ansibleautomationplatform osac-aap -n {{ snapshot_osac_namespace }} \
+          --type merge -p '{"spec":{"eda":{"disabled":true}}}'
+      fi
+      oc delete eda osac-aap-eda -n {{ snapshot_osac_namespace }} --ignore-not-found
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+
+- name: Wait for Keycloak to be ready
+  ansible.builtin.shell:
+    cmd: oc rollout status deploy/keycloak-service -n keycloak --timeout=300s
+  environment:
+    KUBECONFIG: /root/.kube/config
+
+- name: Read existing Keycloak client secrets and patch realm.json (OSAC-2115)
+  ansible.builtin.shell:
+    cmd: |
+      oc port-forward svc/keycloak -n keycloak 18443:443 &
+      PF_PID=$!
+      sleep 3
+      trap "kill $PF_PID 2>/dev/null" EXIT
+
+      KC_URL="https://localhost:18443"
+      TOKEN=$(curl -sk -X POST "${KC_URL}/realms/master/protocol/openid-connect/token" \
+        -d "client_id=admin-cli&username=admin&password=admin&grant_type=password" \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+      REALM_FILE="{{ osac_installer_dir }}/prerequisites/keycloak/service/files/realm.json"
+      for CLIENT_ID in osac-controller osac-admin; do
+        UUID=$(curl -sk "${KC_URL}/admin/realms/osac/clients?clientId=${CLIENT_ID}" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['id'] if d else '')")
+        SECRET=$(curl -sk "${KC_URL}/admin/realms/osac/clients/${UUID}/client-secret" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")
+        [ -n "${SECRET}" ] || { echo "ERROR: empty secret for ${CLIENT_ID}" >&2; exit 1; }
+        if [ "$CLIENT_ID" = "osac-controller" ]; then
+          sed -i "s|__OSAC_CONTROLLER_CLIENT_SECRET__|${SECRET}|" "${REALM_FILE}"
+        else
+          sed -i "s|__OSAC_ADMIN_CLIENT_SECRET__|${SECRET}|" "${REALM_FILE}"
+        fi
+        echo "Resolved ${CLIENT_ID} secret from Keycloak"
+      done
+  environment:
+    KUBECONFIG: /root/.kube/config
+
 - name: Report OSAC prep completed
   ansible.builtin.debug:
     msg: "OSAC prep completed — ready for refresh script"
