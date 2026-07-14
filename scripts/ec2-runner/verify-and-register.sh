@@ -103,6 +103,19 @@ fi
 
 echo -e "${GREEN}${BOLD}Tooling verification passed. Registering as JIT runner: ${RUNNER_LABEL}${RESET}"
 
+# WARNING: the "self-hosted" label below is not optional and cannot be
+# removed by dropping it from this call -- GitHub applies "self-hosted" (and
+# OS/arch) to every self-hosted runner automatically, JIT-registered or not.
+# That means this box, while it's alive and listening, is eligible to be
+# claimed by ANY job in this repo that does `runs-on: self-hosted` generically
+# -- not just the specific ${RUNNER_LABEL} job it was provisioned for. As of
+# this writing no workflow in this repo does that (grep for `runs-on:`
+# across .github/workflows/ to confirm before relying on this), but it's a
+# landmine for a future workflow: it would run arbitrary steps as root on a
+# freshly-provisioned, internet-facing box. Because generate-jitconfig is
+# called at the repo level (not org level), this is scoped to this repo only.
+# Never add `runs-on: self-hosted` generically to a workflow in this repo --
+# always target the specific per-run label instead.
 JIT_RESPONSE=$(gh api \
     --method POST \
     -H "Accept: application/vnd.github+json" \

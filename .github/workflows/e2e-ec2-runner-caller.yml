@@ -14,8 +14,11 @@ on:
   workflow_dispatch:
     inputs:
       instance-type:
-        description: "EC2 instance type"
+        description: "EC2 instance type -- curated allow-list, not free text, so a dispatch (available to anyone with write access) can't accidentally launch an unexpectedly expensive type. Add to `options` deliberately."
         required: false
+        type: choice
+        options:
+          - "c5n.metal"
         default: "c5n.metal"
       aws-region:
         description: "AWS region to launch into"

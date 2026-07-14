@@ -52,6 +52,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Validate and bootstrap
         id: setup
@@ -146,6 +148,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Placeholder test step
         id: placeholder
@@ -171,10 +175,20 @@ jobs:
       # as an output.
       KNOWN_HOSTS_FILE: /tmp/osac-ec2-known-hosts-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      # Every step below is if: always(): the job-level if: always() only
+      # guarantees this job STARTS regardless of provision/test outcome, it
+      # does not make a later step run if an earlier step in this job fails.
+      # Without this, a transient Vault hiccup while fetching credentials
+      # here would skip the "Teardown" step itself, leaving a real, billed
+      # instance running with no automated path to terminate it.
       - name: Checkout repository
+        if: always()
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Validate and bootstrap
+        if: always()
         id: setup
         uses: ./.github/actions/validate-and-bootstrap
         with:
@@ -182,6 +196,7 @@ jobs:
           run-id: ${{ github.run_id }}
 
       - name: Fetch EC2 runner AWS credentials
+        if: always()
         id: aws-creds
         uses: ./.github/actions/fetch-ec2-runner-aws-creds
         with:
@@ -189,6 +204,7 @@ jobs:
           secret-id: ${{ steps.setup.outputs.secret-id }}
 
       - name: Fetch EC2 runner GitHub PAT
+        if: always()
         id: gh-pat
         uses: ./.github/actions/fetch-ec2-runner-github-pat
         with:
@@ -196,6 +212,7 @@ jobs:
           secret-id: ${{ steps.setup.outputs.secret-id }}
 
       - name: Teardown
+        if: always()
         shell: bash
         env:
           INSTANCE_ID: ${{ needs.provision.outputs.instance-id }}

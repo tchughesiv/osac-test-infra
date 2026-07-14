@@ -56,10 +56,13 @@
 #                         once more real-world data exists)
 #   SSH_TIMEOUT_SECONDS  timeout waiting for SSH to accept connections (default 600)
 #
-# Outputs (written to $GITHUB_OUTPUT if set, always echoed to stdout):
-#   instance-id
-#   public-ip
-#   ssh-user
+# Outputs (written to $GITHUB_OUTPUT if set, always echoed to stdout, each
+# emitted as soon as it's known -- not only on full success, so teardown.sh
+# can still find and terminate the instance if this script fails partway
+# through, e.g. an SSH timeout after the instance is already running):
+#   ssh-user      emitted immediately (known before any AWS call)
+#   instance-id   emitted once RunInstances returns an id
+#   public-ip     emitted once the instance reports one
 
 set -euo pipefail
 
@@ -82,6 +85,23 @@ SSH_USER="${SSH_USER:-root}"
 BOOT_TIMEOUT_SECONDS="${BOOT_TIMEOUT_SECONDS:-1800}"
 SSH_TIMEOUT_SECONDS="${SSH_TIMEOUT_SECONDS:-600}"
 INSTANCE_NAME="osac-ephemeral-${RUN_ID}"
+
+# Emits an output as soon as its value is known, not just on full success --
+# teardown.sh (if: always()) needs instance-id to clean up a real, billed
+# instance even when this script exits 1 partway through (e.g. SSH never
+# comes up). Writing it only at the end left every post-launch failure path
+# with no instance-id in $GITHUB_OUTPUT, so teardown.sh saw an empty
+# INSTANCE_ID, logged "nothing to terminate", and exited 0 -- reporting a
+# clean run while the instance kept running indefinitely.
+emit_output() {
+    local name="$1" value="$2"
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+        printf '%s=%s\n' "${name}" "${value}" >> "$GITHUB_OUTPUT"
+    fi
+    printf '%s=%s\n' "${name}" "${value}"
+}
+
+emit_output ssh-user "$SSH_USER"
 
 if [ ! -f "$ORCHESTRATOR_PUBKEY_PATH" ]; then
     echo -e "${RED}${BOLD}ERROR: orchestrator public key not found at ${ORCHESTRATOR_PUBKEY_PATH}${RESET}" >&2
@@ -145,6 +165,7 @@ if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "null" ]; then
     exit 1
 fi
 echo -e "${GREEN}Launched ${INSTANCE_ID}${RESET}"
+emit_output instance-id "$INSTANCE_ID"
 
 echo -e "${GREEN}Waiting for instance status checks to pass (timeout ${BOOT_TIMEOUT_SECONDS}s)...${RESET}"
 ELAPSED=0
@@ -178,6 +199,7 @@ if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = "None" ]; then
     exit 1
 fi
 echo -e "${GREEN}Public IP: ${PUBLIC_IP}${RESET}"
+emit_output public-ip "$PUBLIC_IP"
 
 echo -e "${GREEN}Waiting for SSH to accept connections (timeout ${SSH_TIMEOUT_SECONDS}s)...${RESET}"
 ELAPSED=0
@@ -198,15 +220,3 @@ until ssh -i "$SSH_KEY_PATH" \
 done
 
 echo -e "${GREEN}${BOLD}SSH ready. Provisioning complete.${RESET}"
-
-if [ -n "${GITHUB_OUTPUT:-}" ]; then
-    {
-        echo "instance-id=${INSTANCE_ID}"
-        echo "public-ip=${PUBLIC_IP}"
-        echo "ssh-user=${SSH_USER}"
-    } >> "$GITHUB_OUTPUT"
-fi
-
-echo "instance-id=${INSTANCE_ID}"
-echo "public-ip=${PUBLIC_IP}"
-echo "ssh-user=${SSH_USER}"

@@ -41,6 +41,15 @@
 # Optional env vars:
 #   RUNNER_VERSION   GitHub Actions runner version (default: 2.335.1, keep in
 #                    sync with scripts/runners/action-runners-setup.sh)
+#   RUNNER_CONNECT_TIMEOUT_SECONDS  timeout waiting for the runner to report
+#                    it has actually connected to GitHub (default 60). A
+#                    systemd "active" unit only proves the process is still
+#                    running, not that GitHub accepted it -- a deprecated
+#                    RUNNER_VERSION (this has already happened once to the
+#                    sibling scripts/runners/action-runners-setup.sh pin)
+#                    still shows "active" while GitHub silently rejects it,
+#                    which would otherwise leave the test job queued forever
+#                    for a runner that can never pick it up.
 
 set -euo pipefail
 
@@ -56,6 +65,7 @@ RED="\e[31m"
 : "${KNOWN_HOSTS_FILE:?KNOWN_HOSTS_FILE is required}"
 
 RUNNER_VERSION="${RUNNER_VERSION:-2.335.1}"
+RUNNER_CONNECT_TIMEOUT_SECONDS="${RUNNER_CONNECT_TIMEOUT_SECONDS:-60}"
 RUNNER_DIR="/opt/actions-runner"
 SERVICE_NAME="osac-ephemeral-runner"
 ENV_FILE="/etc/systemd/system/${SERVICE_NAME}.env"
@@ -137,4 +147,19 @@ if ! ssh_exec "systemctl is-active --quiet ${SERVICE_NAME}.service"; then
     exit 1
 fi
 
-echo -e "${GREEN}${BOLD}Runner service is active. Listening for the scheduled job.${RESET}"
+# "active" only proves the process is still running, not that GitHub
+# accepted it -- a rejected runner (e.g. deprecated RUNNER_VERSION) stays
+# "active" while retrying/backing off forever. Confirm the runner itself
+# reports success before declaring this script done.
+echo -e "${GREEN}Waiting for runner to connect to GitHub (timeout ${RUNNER_CONNECT_TIMEOUT_SECONDS}s)...${RESET}"
+POLL_INTERVAL=5
+SECONDS=0
+until ssh_exec "sudo journalctl -u ${SERVICE_NAME}.service --no-pager 2>/dev/null | grep -q 'Listening for Jobs'"; do
+    if [ "$SECONDS" -ge "$RUNNER_CONNECT_TIMEOUT_SECONDS" ]; then
+        echo -e "${RED}${BOLD}ERROR: runner did not report 'Listening for Jobs' within ${RUNNER_CONNECT_TIMEOUT_SECONDS}s -- check journalctl -u ${SERVICE_NAME}.service on ${PUBLIC_IP}${RESET}" >&2
+        exit 1
+    fi
+    sleep "$POLL_INTERVAL"
+done
+
+echo -e "${GREEN}${BOLD}Runner connected. Listening for the scheduled job.${RESET}"
