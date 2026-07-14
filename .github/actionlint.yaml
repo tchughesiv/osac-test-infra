@@ -1,0 +1,21 @@
+self-hosted-runner:
+  # Custom self-hosted runner labels used across this repo's workflows.
+  # Without this, actionlint flags every runs-on: <label> referencing one
+  # of these as "unknown label".
+  labels:
+    - osac-ci
+    - monitoring-central
+    - osac-ci-orchestrator
+
+paths:
+  .github/workflows/**/*.yml:
+    ignore:
+      # actionlint's embedded shellcheck pass on run: blocks has no native
+      # severity threshold (unlike shellcheck's own --severity flag, applied
+      # separately via .shellcheckrc/pre-commit args for the standalone
+      # shellcheck hook) -- this repo had no bash static-check history
+      # before these hooks were added, so info/style findings across
+      # existing run: blocks are pre-existing, not new. Ignoring by embedded
+      # severity keeps real warning/error-level shellcheck findings (and
+      # everything else actionlint checks) failing the build.
+      - 'shellcheck reported issue in this script: SC[0-9]+:(info|style):'

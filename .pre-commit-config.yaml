@@ -30,3 +30,25 @@ repos:
         name: Ansible Lint
         files: \.(yaml|yml)$
         additional_dependencies: [ansible-core==2.20.3]
+
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.11.0
+    hooks:
+      - id: shellcheck
+        # infra/netris/netris-lab/ was vendored wholesale from an external
+        # project (see "vendor netris-test-infra into infra/netris/"), not
+        # something this team maintains style-wise -- same reasoning as the
+        # ansible_collections vendor/ exclude below, just not named vendor/.
+        exclude: ^infra/(.*/vendor/|netris/netris-lab/)
+        # This repo had no bash static-check history before this hook was
+        # added, so the first run surfaces its full backlog of info/style
+        # suggestions across every existing script. --severity=warning keeps
+        # the gate meaningful for real bugs without requiring an unrelated
+        # repo-wide style cleanup to land it; see .shellcheckrc for the same
+        # floor applied to actionlint's embedded shellcheck pass.
+        args: ["--severity=warning"]
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint

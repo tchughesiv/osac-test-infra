@@ -1,0 +1,12 @@
+# ShellCheck config (read automatically by both the standalone shellcheck
+# pre-commit hook and actionlint's embedded shellcheck pass on workflow
+# run: blocks).
+#
+# severity=warning: shellcheck's default lint pass surfaces its full history
+# of info/style suggestions across this repo the first time it runs (there
+# was no static bash checking at all before shellcheck/actionlint were added
+# to .pre-commit-config.yaml). Setting the floor to warning keeps this gate
+# meaningful for real bugs going forward without requiring an unrelated
+# repo-wide style cleanup to land it. Revisit tightening this once the
+# existing info/style findings are cleaned up incrementally.
+severity=warning

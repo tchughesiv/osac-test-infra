@@ -20,6 +20,10 @@ on:
         description: "Branch/ref of osac-installer"
         required: false
         default: "main"
+      installer-repo:
+        description: "GitHub repo (owner/name) to clone osac-installer from"
+        required: false
+        default: "osac-project/osac-installer"
       image-overrides:
         description: "JSON mapping Helm value paths to image refs"
         required: false
