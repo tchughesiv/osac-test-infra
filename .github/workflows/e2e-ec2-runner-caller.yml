@@ -24,6 +24,10 @@ on:
         description: "AWS region to launch into"
         required: false
         default: "us-east-1"
+      tooling-check-cmds:
+        description: "Semicolon-separated commands to verify on the box before JIT registration. Default is a placeholder pending CaaS/Netris team sync -- override here to smoke-test against a stock AMI (e.g. 'true') or to check for whatever the real test suite needs, without editing the workflow file."
+        required: false
+        default: "command -v podman"
 
 jobs:
   e2e-ec2-runner:
@@ -31,3 +35,4 @@ jobs:
     with:
       instance-type: ${{ inputs.instance-type || 'c5n.metal' }}
       aws-region: ${{ inputs.aws-region || 'us-east-1' }}
+      tooling-check-cmds: ${{ inputs.tooling-check-cmds || 'command -v podman' }}
