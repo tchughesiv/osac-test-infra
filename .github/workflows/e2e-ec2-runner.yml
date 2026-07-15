@@ -19,8 +19,16 @@ on:
         required: false
         type: string
         default: "osac-ci-orchestrator"
+      # The default installs real packages/network access (dnf + pip), unlike
+      # the old "command -v podman" placeholder which could never fail on
+      # network flakiness. Each semicolon-separated item runs as its own SSH
+      # call with no retry -- v1 accepts that a transient mirror/PyPI hiccup
+      # hard-fails verification (skipping JIT registration, same cost as any
+      # other tooling-check failure), matching this repo's existing
+      # accept-and-revisit-if-flaky precedent (see provision.sh's
+      # InsufficientInstanceCapacity handling for the same philosophy).
       tooling-check-cmds:
-        description: "Semicolon-separated commands to run/verify on the box before JIT registration. Defaults to installing and verifying the CaaS/Netris flow's prerequisites (ansible-core, python3-pip, make -- matching what the equivalent Prow lab-setup step installed), since that's this workflow's one real consumer today."
+        description: "Semicolon-separated commands to run/verify on the box before JIT registration. Defaults to installing and verifying the CaaS/Netris flow's prerequisites (ansible-core, python3-pip, make -- matching what the equivalent Prow lab-setup step installed, and infra/netris/README.md's own documented setup), since that's what this workflow is being built to serve -- the test job itself doesn't consume these yet (still a placeholder), a later PR adds the real steps that do."
         required: false
         type: string
         default: "dnf install -y ansible-core python3-pip make; pip3 install ansible; command -v ansible-playbook; command -v make"
