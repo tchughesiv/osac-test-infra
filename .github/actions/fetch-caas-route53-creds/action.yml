@@ -1,0 +1,37 @@
+---
+name: Fetch CaaS Route 53 credentials
+description: >-
+  Retrieve the AWS credentials the CaaS/Netris e2e flow uses for Route 53
+  DNS management (infra/netris's ocp_dns role: ChangeResourceRecordSets/
+  ListHostedZones/GetChange on the shared hosted zone) from Vault. Separate
+  from fetch-ec2-runner-aws-creds, which is scoped to EC2 lifecycle actions
+  only and has no Route 53 permissions at all -- confirmed directly against
+  the live credential.
+
+inputs:
+  role-id:
+    required: true
+  secret-id:
+    required: true
+
+outputs:
+  AWS_ACCESS_KEY_ID:
+    value: ${{ steps.vault.outputs.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY:
+    value: ${{ steps.vault.outputs.AWS_SECRET_ACCESS_KEY }}
+
+runs:
+  using: composite
+  steps:
+    - name: Retrieve Route 53 credentials from Vault
+      id: vault
+      uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
+      with:
+        url: http://127.0.0.1:8200
+        method: approle
+        roleId: ${{ inputs.role-id }}
+        secretId: ${{ inputs.secret-id }}
+        exportEnv: false
+        secrets: |
+          secret/data/osac/e2e/caas-route53-credentials access_key_id | AWS_ACCESS_KEY_ID ;
+          secret/data/osac/e2e/caas-route53-credentials secret_access_key | AWS_SECRET_ACCESS_KEY

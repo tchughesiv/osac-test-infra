@@ -1,0 +1,30 @@
+---
+name: Fetch Netris license
+description: >-
+  Retrieve the Netris license key the CaaS/Netris e2e flow needs from Vault
+  (infra/netris's Prerequisites: a license.key file at the repo root).
+
+inputs:
+  role-id:
+    required: true
+  secret-id:
+    required: true
+
+outputs:
+  NETRIS_LICENSE:
+    value: ${{ steps.vault.outputs.NETRIS_LICENSE }}
+
+runs:
+  using: composite
+  steps:
+    - name: Retrieve Netris license from Vault
+      id: vault
+      uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
+      with:
+        url: http://127.0.0.1:8200
+        method: approle
+        roleId: ${{ inputs.role-id }}
+        secretId: ${{ inputs.secret-id }}
+        exportEnv: false
+        secrets: |
+          secret/data/osac/e2e/netris-license license_key | NETRIS_LICENSE
