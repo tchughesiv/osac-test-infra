@@ -6,7 +6,14 @@ description: >-
   ListHostedZones/GetChange on the shared hosted zone) from Vault. Separate
   from fetch-ec2-runner-aws-creds, which is scoped to EC2 lifecycle actions
   only and has no Route 53 permissions at all -- confirmed directly against
-  the live credential.
+  the live credential. Outputs are prefixed ROUTE53_ (unlike
+  fetch-ec2-runner-aws-creds's bare AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)
+  specifically so a workflow using both actions can't silently wire the
+  wrong credential into the wrong step via an identically-named output.
+  Does not include aws_region -- infra/netris's own Makefile/ansible
+  defaults to us-east-1 if neither the config file nor AWS_DEFAULT_REGION
+  is set (see inventory/group_vars/all.yml), so a consumer needing a
+  non-default region must supply it separately.
 
 inputs:
   role-id:
@@ -15,10 +22,10 @@ inputs:
     required: true
 
 outputs:
-  AWS_ACCESS_KEY_ID:
-    value: ${{ steps.vault.outputs.AWS_ACCESS_KEY_ID }}
-  AWS_SECRET_ACCESS_KEY:
-    value: ${{ steps.vault.outputs.AWS_SECRET_ACCESS_KEY }}
+  ROUTE53_AWS_ACCESS_KEY_ID:
+    value: ${{ steps.vault.outputs.ROUTE53_AWS_ACCESS_KEY_ID }}
+  ROUTE53_AWS_SECRET_ACCESS_KEY:
+    value: ${{ steps.vault.outputs.ROUTE53_AWS_SECRET_ACCESS_KEY }}
 
 runs:
   using: composite
@@ -33,5 +40,5 @@ runs:
         secretId: ${{ inputs.secret-id }}
         exportEnv: false
         secrets: |
-          secret/data/osac/e2e/caas-route53-credentials access_key_id | AWS_ACCESS_KEY_ID ;
-          secret/data/osac/e2e/caas-route53-credentials secret_access_key | AWS_SECRET_ACCESS_KEY
+          secret/data/osac/e2e/caas-route53-credentials access_key_id | ROUTE53_AWS_ACCESS_KEY_ID ;
+          secret/data/osac/e2e/caas-route53-credentials secret_access_key | ROUTE53_AWS_SECRET_ACCESS_KEY
