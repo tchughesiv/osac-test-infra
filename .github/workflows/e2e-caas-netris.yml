@@ -308,7 +308,7 @@ jobs:
           EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
         run: make deploy-infra INFRA=netris SUITE=caas EXTRA_VARS="${EXTRA_VARS}"
 
-      - name: Deploy OSAC from snapshot (make deploy-osac)
+      - name: Deploy OCP + OSAC (fresh install, make deploy-osac)
         shell: bash
         env:
           EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
