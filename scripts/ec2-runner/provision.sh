@@ -55,6 +55,16 @@
 #                         reach instance-status=ok/system-status=ok; adjust
 #                         once more real-world data exists)
 #   SSH_TIMEOUT_SECONDS  timeout waiting for SSH to accept connections (default 600)
+#   ROOT_VOLUME_SIZE_GB  root EBS volume size in GB (default 500). The CaaS/
+#                        Netris flow alone needs a one-time ~60GB OCP
+#                        snapshot download (infra/netris/README.md) plus a
+#                        ~3GB Netris container/cloud-image cache, on top of
+#                        whatever headroom the lab's own qcow2 overlay disks
+#                        need -- confirmed too small the hard way: a real run
+#                        exhausted a stock AMI's default (single-digit-GB)
+#                        root volume and failed with "No space left on
+#                        device" partway through image caching, well before
+#                        even reaching the 60GB snapshot download.
 #
 # Outputs (written to $GITHUB_OUTPUT if set, always echoed to stdout, each
 # emitted as soon as it's known -- not only on full success, so teardown.sh
@@ -84,6 +94,11 @@ YELLOW="\e[33m"
 SSH_USER="${SSH_USER:-root}"
 BOOT_TIMEOUT_SECONDS="${BOOT_TIMEOUT_SECONDS:-1800}"
 SSH_TIMEOUT_SECONDS="${SSH_TIMEOUT_SECONDS:-600}"
+ROOT_VOLUME_SIZE_GB="${ROOT_VOLUME_SIZE_GB:-500}"
+if [[ ! "$ROOT_VOLUME_SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
+    echo -e "${RED}${BOLD}ERROR: ROOT_VOLUME_SIZE_GB '${ROOT_VOLUME_SIZE_GB}' is not a positive integer.${RESET}" >&2
+    exit 1
+fi
 INSTANCE_NAME="osac-ephemeral-${RUN_ID}"
 
 # Emits an output as soon as its value is known, not just on full success --
@@ -115,7 +130,8 @@ echo -e "${GREEN}AMI: ${AMI_ID}  Type: ${INSTANCE_TYPE}${RESET}"
 
 USER_DATA_FILE=$(mktemp)
 RUN_INSTANCES_OUTPUT=$(mktemp)
-trap 'rm -f "$USER_DATA_FILE" "$RUN_INSTANCES_OUTPUT"' EXIT
+DESCRIBE_IMAGES_OUTPUT=$(mktemp)
+trap 'rm -f "$USER_DATA_FILE" "$RUN_INSTANCES_OUTPUT" "$DESCRIBE_IMAGES_OUTPUT"' EXIT
 
 # Both the top-level ssh_authorized_keys directive and the runcmd write are
 # intentionally redundant, not a leftover: which one actually lands the key
@@ -137,7 +153,22 @@ runcmd:
     chmod 600 /root/.ssh/authorized_keys
 EOF
 
-echo -e "${GREEN}Launching instance...${RESET}"
+if ! aws ec2 describe-images \
+        --image-ids "$AMI_ID" \
+        --query 'Images[0].RootDeviceName' \
+        --output text \
+        > "$DESCRIBE_IMAGES_OUTPUT" 2>&1; then
+    echo -e "${RED}${BOLD}ERROR: describe-images failed for AMI ${AMI_ID}:${RESET}" >&2
+    cat "$DESCRIBE_IMAGES_OUTPUT" >&2
+    exit 1
+fi
+ROOT_DEVICE_NAME=$(cat "$DESCRIBE_IMAGES_OUTPUT")
+if [ -z "$ROOT_DEVICE_NAME" ] || [ "$ROOT_DEVICE_NAME" = "None" ]; then
+    echo -e "${RED}${BOLD}ERROR: could not determine root device name for AMI ${AMI_ID}${RESET}" >&2
+    exit 1
+fi
+
+echo -e "${GREEN}Launching instance (root volume: ${ROOT_VOLUME_SIZE_GB}GB on ${ROOT_DEVICE_NAME})...${RESET}"
 
 if ! aws ec2 run-instances \
         --image-id "$AMI_ID" \
@@ -146,6 +177,7 @@ if ! aws ec2 run-instances \
         --security-group-ids "$SECURITY_GROUP_ID" \
         --user-data "file://${USER_DATA_FILE}" \
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_NAME}},{Key=osac-ephemeral,Value=true},{Key=osac-run-id,Value=${RUN_ID}}]" \
+        --block-device-mappings "[{\"DeviceName\":\"${ROOT_DEVICE_NAME}\",\"Ebs\":{\"VolumeSize\":${ROOT_VOLUME_SIZE_GB},\"VolumeType\":\"gp3\",\"DeleteOnTermination\":true}}]" \
         --count 1 \
         --output json \
         > "$RUN_INSTANCES_OUTPUT" 2>&1; then
@@ -219,4 +251,28 @@ until ssh -i "$SSH_KEY_PATH" \
     ELAPSED=$((ELAPSED + POLL_INTERVAL))
 done
 
-echo -e "${GREEN}${BOLD}SSH ready. Provisioning complete.${RESET}"
+echo -e "${GREEN}SSH ready.${RESET}"
+
+# Requesting a bigger EBS volume above doesn't guarantee the root filesystem
+# actually grows to fill it -- that depends on the AMI's own cloud-init
+# growpart/resizefs config running on first boot. Verify it here, right
+# after SSH comes up, rather than finding out ~5 minutes into a later,
+# disk-hungry step the way the original "No space left on device" failure
+# was discovered -- failing fast here costs one SSH round trip instead of
+# another wasted partial CaaS/Netris run.
+echo -e "${GREEN}Verifying root filesystem grew to the requested volume size...${RESET}"
+ROOT_FS_SIZE_GB=$(ssh -i "$SSH_KEY_PATH" \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile="${KNOWN_HOSTS_FILE}" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        "${SSH_USER}@${PUBLIC_IP}" "df --output=size -B G / | tail -n1 | tr -dc '0-9'" 2>/dev/null) || ROOT_FS_SIZE_GB=""
+MIN_EXPECTED_GB=$((ROOT_VOLUME_SIZE_GB * 80 / 100))
+if [ -z "$ROOT_FS_SIZE_GB" ] || [ "$ROOT_FS_SIZE_GB" -lt "$MIN_EXPECTED_GB" ]; then
+    echo -e "${RED}${BOLD}ERROR: root filesystem is only ${ROOT_FS_SIZE_GB:-unknown}GB, expected at least ${MIN_EXPECTED_GB}GB (requested a ${ROOT_VOLUME_SIZE_GB}GB volume).${RESET}" >&2
+    echo -e "${YELLOW}The AMI likely doesn't auto-grow its root partition on boot (no cloud-init growpart/resizefs). Instance ${INSTANCE_ID} is still running -- teardown.sh must still be called.${RESET}" >&2
+    exit 1
+fi
+echo -e "${GREEN}Root filesystem: ${ROOT_FS_SIZE_GB}GB.${RESET}"
+
+echo -e "${GREEN}${BOLD}Provisioning complete.${RESET}"
