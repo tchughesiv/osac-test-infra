@@ -16,12 +16,10 @@ setup-infra:
 deploy-infra:
 	$(MAKE) -f Makefile deploy-lab EXTRA_VARS='$(EXTRA_VARS)'
 
-# --- Deploy: OCP (real Assisted Installer install, not a snapshot restore)
-#     + OSAC (fresh Helm install, not a snapshot-adoption refresh) ---
+# --- Deploy: OCP + OSAC from snapshot ---
 
 deploy-osac:
-	$(MAKE) -f Makefile deploy-ocp EXTRA_VARS='$(EXTRA_VARS)'
-	$(MAKE) -f Makefile deploy-osac-full EXTRA_VARS='$(EXTRA_VARS)'
+	$(MAKE) -f Makefile deploy-ocp-snapshot EXTRA_VARS='$(EXTRA_VARS)'
 	@printf '%s\n' \
 		'KUBECONFIG=/root/.kube/config' \
 		'OSAC_NAMESPACE=$(or $(OSAC_NAMESPACE),osac-e2e-ci)' \
