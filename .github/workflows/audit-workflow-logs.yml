@@ -91,6 +91,7 @@ jobs:
           : > "${SUMMARY_JSONL}"
           FLAGGED=0
           SKIPPED_SCANS=0
+          PURGE_FAILURES=0
 
           # Process substitution (not a trailing pipe) so the loop runs in
           # this shell, not a subshell -- otherwise FLAGGED/SKIPPED_SCANS
@@ -112,10 +113,16 @@ jobs:
               SKIPPED_SCANS=$((SKIPPED_SCANS + 1))
             elif [[ "${LEAKS_FOUND}" == "true" ]]; then
               FLAGGED=$((FLAGGED + 1))
+              # A purge failure here means the exposure window for this run
+              # is still open on GitHub -- tracked separately from
+              # SKIPPED_SCANS (which means "never checked") since this run
+              # *was* checked and *did* find something, it just couldn't
+              # close the loop.
+              [[ "${PURGE_OK}" != "true" ]] && PURGE_FAILURES=$((PURGE_FAILURES + 1))
               mkdir -p "${ALL_REDACTED_DIR}/${SLUG}"
               cp -r "${OUTPUT_DIR}/redacted/." "${ALL_REDACTED_DIR}/${SLUG}/"
-              jq -c --arg run_id "${RUN_ID}" --arg repo "${REPO}" --arg count "${FINDINGS_COUNT}" \
-                '{run_id: $run_id, repo: $repo, findings_count: ($count | tonumber), findings: [.[] | {rule: .RuleID, file: .File, line: .StartLine}]}' \
+              jq -c --arg run_id "${RUN_ID}" --arg repo "${REPO}" --arg count "${FINDINGS_COUNT}" --argjson purge_ok "${PURGE_OK}" \
+                '{run_id: $run_id, repo: $repo, findings_count: ($count | tonumber), purge_ok: $purge_ok, findings: [.[] | {rule: .RuleID, file: .File, line: .StartLine}]}' \
                 "${OUTPUT_DIR}/findings.json" >> "${SUMMARY_JSONL}"
             fi
             echo "::endgroup::"
@@ -123,6 +130,7 @@ jobs:
 
           echo "flagged-count=${FLAGGED}" >> "$GITHUB_OUTPUT"
           echo "skipped-scans=${SKIPPED_SCANS}" >> "$GITHUB_OUTPUT"
+          echo "purge-failures=${PURGE_FAILURES}" >> "$GITHUB_OUTPUT"
           echo "SUMMARY_JSONL=${SUMMARY_JSONL}" >> "$GITHUB_ENV"
           echo "ALL_REDACTED_DIR=${ALL_REDACTED_DIR}" >> "$GITHUB_ENV"
 
@@ -148,6 +156,7 @@ jobs:
           # two skip counters are added in bash below, not here.
           SKIPPED_TARGETS: ${{ steps.list.outputs.skipped-targets || '0' }}
           SKIPPED_SCANS: ${{ steps.scan.outputs.skipped-scans || '0' }}
+          PURGE_FAILURES: ${{ steps.scan.outputs.purge-failures || '0' }}
           DISCOVERY_FAILED: ${{ steps.list.outputs.discovery-failed || 'false' }}
           RUN_ID: ${{ github.run_id }}
         run: |
@@ -175,6 +184,10 @@ jobs:
               echo ""
               echo ":warning: Cross-repo caller discovery failed -- only this repo's own workflows were audited this time, not the other known callers -- this audit is partial, not a clean pass."
             fi
+            if [[ "${PURGE_FAILURES}" != "0" ]]; then
+              echo ""
+              echo ":rotating_light: **${PURGE_FAILURES}** flagged run(s) could not have their raw logs deleted -- the exposure window is **NOT** closed for those runs (see the tracking issue's \"Purged\" column)."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
           echo "skipped-total=${SKIPPED_TOTAL}" >> "$GITHUB_OUTPUT"
 
@@ -183,6 +196,7 @@ jobs:
           [[ "${FLAGGED_COUNT}" != "0" ]] && NOTIFY_PARTS+=("${FLAGGED_COUNT} run(s) with leaked credential(s)")
           [[ "${SKIPPED_TOTAL}" != "0" ]] && NOTIFY_PARTS+=("${SKIPPED_TOTAL} target(s)/run(s) not scanned (partial audit)")
           [[ "${DISCOVERY_FAILED}" == "true" ]] && NOTIFY_PARTS+=("cross-repo caller discovery failed (partial audit)")
+          [[ "${PURGE_FAILURES}" != "0" ]] && NOTIFY_PARTS+=("${PURGE_FAILURES} run(s) with unclosed exposure window (purge failed)")
           # "${arr[*]}" with IFS set only honors the *first* IFS character
           # when joining, so a ", " separator needs an explicit printf join
           # instead.
@@ -208,12 +222,14 @@ jobs:
           {
             echo "Automated audit found leaked credential(s) in **${FLAGGED_COUNT}** e2e workflow run(s)."
             echo ""
-            echo "Raw logs for each affected run have been deleted; a redacted copy of each is in the"
+            echo "A redacted copy of each is in the"
             echo "[\`audit-redacted-logs-${RUN_ID}\`](${ARTIFACT_URL}) artifact from [this audit run](${RUN_URL})."
+            echo "Raw logs were deleted for runs marked :white_check_mark: below -- for any marked :x:,"
+            echo "the exposure window is still open and the raw logs need to be deleted manually."
             echo ""
-            echo "| Repo | Run | Findings | Rule(s) |"
-            echo "|---|---|---|---|"
-            jq -r '"| \(.repo) | [\(.run_id)](https://github.com/\(.repo)/actions/runs/\(.run_id)) | \(.findings_count) | " + ([.findings[].rule] | unique | join(", ")) + " |"' "${SUMMARY_JSONL}"
+            echo "| Repo | Run | Findings | Rule(s) | Purged |"
+            echo "|---|---|---|---|---|"
+            jq -r '"| \(.repo) | [\(.run_id)](https://github.com/\(.repo)/actions/runs/\(.run_id)) | \(.findings_count) | " + ([.findings[].rule] | unique | join(", ")) + " | " + (if .purge_ok then ":white_check_mark:" else ":x:" end) + " |"' "${SUMMARY_JSONL}"
             echo ""
             echo "Rotate any credential(s) above that are real (not test/dev-only values)."
           } > "${BODY_FILE}"
@@ -258,6 +274,9 @@ jobs:
         # failed status is the fallback signal in that specific case. This is
         # an accepted gap (no secrets channel independent of Vault exists in
         # this project by design) rather than a fix.
+        # steps.scan.outputs.purge-failures isn't listed separately here --
+        # a purge failure can only happen on a run that's already flagged
+        # (flagged-count != '0'), so it's already implied by that condition.
         if: >
           always() &&
           steps.vault.outcome == 'success' &&

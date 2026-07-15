@@ -22,6 +22,9 @@ outputs:
   leaks-found:
     description: "'true' if gitleaks found any secrets in the run's logs"
     value: ${{ steps.scan.outputs.leaks-found }}
+  purge-ok:
+    description: "'false' if leaks were found but deleting the raw logs failed (exposure window is NOT closed) -- only meaningful when leaks-found is 'true'"
+    value: ${{ steps.scan.outputs.purge-ok }}
   findings-count:
     description: "Number of findings (0 if none)"
     value: ${{ steps.scan.outputs.findings-count }}
@@ -42,6 +45,7 @@ runs:
         source "${OUTPUT_DIR}/status.env"
         echo "scan-ok=${SCAN_OK}" >> "$GITHUB_OUTPUT"
         echo "leaks-found=${LEAKS_FOUND}" >> "$GITHUB_OUTPUT"
+        echo "purge-ok=${PURGE_OK}" >> "$GITHUB_OUTPUT"
         echo "findings-count=${FINDINGS_COUNT}" >> "$GITHUB_OUTPUT"
         # Step output, not $GITHUB_ENV: an env var here would leak into every
         # later step of the *calling* job (not just this action's own steps),
@@ -77,6 +81,7 @@ runs:
         REPO: ${{ github.repository }}
         SERVER_URL: ${{ github.server_url }}
         FINDINGS_COUNT: ${{ steps.scan.outputs.findings-count }}
+        PURGE_OK: ${{ steps.scan.outputs.purge-ok }}
         OUTPUT_DIR: ${{ steps.scan.outputs.output-dir }}
       run: |
         {
@@ -84,7 +89,15 @@ runs:
           echo ""
           echo "gitleaks found **${FINDINGS_COUNT}** potential secret(s) in the logs for run [${RUN_ID}](${SERVER_URL}/${REPO}/actions/runs/${RUN_ID})."
           echo ""
-          echo "- The raw logs for this run have been deleted to close the exposure window."
+          # Never unconditionally claim the raw logs were deleted -- the
+          # delete call itself can fail (permissions, API hiccup, etc.), in
+          # which case the exposure window is still open and that must be
+          # visible here, not just in a job-log ::warning:: that's easy to miss.
+          if [[ "${PURGE_OK}" == "true" ]]; then
+            echo "- The raw logs for this run have been deleted to close the exposure window."
+          else
+            echo "- :warning: **Failed to delete the raw logs for this run** -- the exposure window is **NOT** closed; the raw logs are still on GitHub. Delete them manually (\`gh api -X DELETE repos/${REPO}/actions/runs/${RUN_ID}/logs\`) or re-run this scan."
+          fi
           echo "- A redacted copy is attached as the \`redacted-logs-${RUN_ID}\` artifact for debugging."
           echo "- Rotate any credential(s) below that are real (not test/dev-only values)."
           echo ""
