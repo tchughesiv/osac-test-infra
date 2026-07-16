@@ -33,12 +33,12 @@ on:
         description: "OCI image containing the cluster-tool flavor"
         required: false
         type: string
-        default: "quay.io/rh-ee-ovishlit/cluster-snapshots:sno-4-19-ps"
+        default: "quay.io/osac-project/cluster-flavors:sno-4-22"
       flavor-name:
         description: "cluster-tool flavor name"
         required: false
         type: string
-        default: "sno-4-19-ps"
+        default: "sno-4-22"
       image-overrides:
         description: "JSON object mapping Helm value paths to image refs, e.g. '{\"service.images.service\":\"ghcr.io/osac-project/fulfillment-service:pr-123\"}'"
         required: false
