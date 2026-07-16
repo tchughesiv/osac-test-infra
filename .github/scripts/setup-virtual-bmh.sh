@@ -27,7 +27,7 @@ set -euo pipefail
 BMH_NAMESPACE="${BMH_NAMESPACE:-host-inventory}"
 BMH_COUNT="${BMH_COUNT:-2}"
 SUSHY_PORT="${SUSHY_PORT:-8000}"
-SUSHY_CONFIG_DIR="${HOME}/sushy"
+SUSHY_CONFIG_DIR="${HOME}/sushy-${CLONE_NAME}"
 SUSHY_PID_FILE="${SUSHY_CONFIG_DIR}/sushy.pid"
 CT_NETWORK="test-infra-net-${CLONE_NAME}"
 VIRSH="virsh -c qemu:///system"
@@ -74,6 +74,8 @@ echo "Gateway IP (host): ${GW_IP}"
 # --- Step 3: Create libvirt storage pool for sushy-tools ---
 POOL_NAME="bmh-${CLONE_NAME}"
 echo "==> Creating libvirt storage pool '${POOL_NAME}'..."
+mkdir -p "${VM_DISK_DIR}"
+chmod 777 "${VM_DISK_DIR}"
 ${VIRSH} pool-define-as "${POOL_NAME}" dir --target "${VM_DISK_DIR}"
 ${VIRSH} pool-start "${POOL_NAME}"
 
@@ -113,11 +115,9 @@ if ! kill -0 "$(cat "${SUSHY_PID_FILE}")" 2>/dev/null; then
 fi
 echo "sushy-emulator running (PID $(cat "${SUSHY_PID_FILE}"))."
 
-# --- Step 4: Create virtual BMH VMs ---
+# --- Step 5: Create virtual BMH VMs ---
 echo "==> Creating ${BMH_COUNT} virtual BMH VMs on network ${CT_NETWORK}..."
 
-mkdir -p "${VM_DISK_DIR}"
-chmod 777 "${VM_DISK_DIR}"
 OVMF_CODE="/usr/share/OVMF/OVMF_CODE.secboot.fd"
 OVMF_VARS="/usr/share/OVMF/OVMF_VARS.fd"
 
