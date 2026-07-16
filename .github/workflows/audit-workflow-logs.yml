@@ -198,7 +198,15 @@ jobs:
             SLUG="${REPO//\//_}-${RUN_ID}"
             echo "::group::Auditing run ${RUN_ID} (${REPO})"
             OUTPUT_DIR="${AUDIT_DIR}/${SLUG}"
-            process_one_run "${RUN_ID}" "${REPO}" "${OUTPUT_DIR}" "${SLUG}"
+            # `if ! process_one_run ...; then` (not a bare call), matching
+            # this skill's own documented pattern for calling a function
+            # whose body relies on suspended errexit: belt-and-suspenders
+            # alongside the function's own explicit `return 0` above, so a
+            # future edit that reintroduces a bad last-statement inside the
+            # function still can't abort the whole loop from here.
+            if ! process_one_run "${RUN_ID}" "${REPO}" "${OUTPUT_DIR}" "${SLUG}"; then
+              echo "::warning::process_one_run returned non-zero unexpectedly for run ${RUN_ID} (${REPO})"
+            fi
             echo "::endgroup::"
           done < <(echo "${RUNS}" | jq -c '.[]')
 
