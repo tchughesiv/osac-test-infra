@@ -91,6 +91,11 @@ jobs:
       # always(): a bare boolean condition implicitly ANDs with success(), so
       # without this, a hard failure in the scan/purge step above -- exactly
       # the failure most worth alerting on -- would skip this notification.
+      # steps.scan.outputs.purge-ok isn't listed in the condition itself --
+      # it can only be 'false' when leaks-found is already 'true' (purge
+      # only ever runs after a leak is found), so that's already covered;
+      # it's surfaced in the message below instead, prioritized ahead of
+      # the plain "detected" message since it needs more urgent action.
       - name: Notify Slack on leak or scan failure
         if: >
           always() &&
@@ -99,7 +104,7 @@ jobs:
         with:
           status: failure
           workflow-name: ${{ github.event.workflow_run.name }}
-          failed-step: "${{ steps.scan.outcome == 'failure' && 'Scan/purge action failed unexpectedly -- see run logs' || steps.scan.outputs.leaks-found == 'true' && format('Credential(s) detected in run logs ({0} finding(s))', steps.scan.outputs.findings-count) || 'Could not fetch run logs to scan for leaked credentials' }}"
+          failed-step: "${{ steps.scan.outputs.purge-ok == 'false' && 'Credential(s) detected, but raw logs could not be deleted -- exposure window is still open, immediate remediation required' || steps.scan.outcome == 'failure' && 'Scan/purge action failed unexpectedly -- see run logs' || steps.scan.outputs.leaks-found == 'true' && format('Credential(s) detected in run logs ({0} finding(s))', steps.scan.outputs.findings-count) || 'Could not fetch run logs to scan for leaked credentials' }}"
           slack-webhook-url: ${{ steps.vault.outputs.SLACK_WEBHOOK_URL }}
           workflow-url: ${{ github.event.workflow_run.html_url }}
           branch-name: ${{ github.event.workflow_run.head_branch }}

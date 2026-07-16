@@ -114,6 +114,68 @@ jobs:
           FLAGGED=0
           SKIPPED_SCANS=0
           PURGE_FAILURES=0
+          PROCESSING_FAILURES=0
+
+          # A single run's processing (scan-run-logs.sh itself, or the
+          # cp/jq calls below) must not be able to abort this whole step --
+          # under this run: block's default set -e, an unguarded failure on
+          # run N would skip every run after it *and* lose the
+          # flagged-count/etc. outputs entirely, silently dropping any
+          # leaks already found on runs 1..N-1 from ever being reported.
+          # Calling this via `if ! process_one_run; then` (not a plain call)
+          # is what actually suspends errexit for the whole function body,
+          # not just the final status check -- every command inside runs to
+          # completion regardless of an earlier one failing, so each step
+          # can be individually checked instead of the function dying
+          # partway through. FLAGGED/SKIPPED_SCANS/etc. are deliberately
+          # not `local` so updates here are visible after the loop.
+          process_one_run() {
+            local run_id="$1" repo="$2" output_dir="$3" slug="$4"
+            if ! .github/scripts/scan-run-logs.sh "${run_id}" "${output_dir}" "${repo}"; then
+              echo "::warning::scan-run-logs.sh failed unexpectedly for run ${run_id} (${repo})"
+              SKIPPED_SCANS=$((SKIPPED_SCANS + 1))
+              return 0
+            fi
+            if [[ ! -f "${output_dir}/status.env" ]]; then
+              echo "::warning::status.env missing after scan-run-logs.sh for run ${run_id} (${repo})"
+              SKIPPED_SCANS=$((SKIPPED_SCANS + 1))
+              return 0
+            fi
+            # shellcheck disable=SC1091
+            source "${output_dir}/status.env"
+
+            if [[ "${SCAN_OK}" != "true" ]]; then
+              # Could not even fetch this run's logs -- must not be silently
+              # folded into "no leaks found", or an auth/permission problem
+              # would look identical to a clean audit.
+              SKIPPED_SCANS=$((SKIPPED_SCANS + 1))
+              return 0
+            fi
+            if [[ "${LEAKS_FOUND}" != "true" ]]; then
+              return 0
+            fi
+
+            FLAGGED=$((FLAGGED + 1))
+            # A purge failure here means the exposure window for this run
+            # is still open on GitHub -- tracked separately from
+            # SKIPPED_SCANS (which means "never checked") since this run
+            # *was* checked and *did* find something, it just couldn't
+            # close the loop.
+            [[ "${PURGE_OK}" != "true" ]] && PURGE_FAILURES=$((PURGE_FAILURES + 1))
+            mkdir -p "${ALL_REDACTED_DIR}/${slug}"
+            if ! cp -r "${output_dir}/redacted/." "${ALL_REDACTED_DIR}/${slug}/"; then
+              echo "::warning::Failed to copy redacted logs for run ${run_id} (${repo}) into the combined artifact -- leak was still detected and counted."
+              PROCESSING_FAILURES=$((PROCESSING_FAILURES + 1))
+              return 0
+            fi
+            if ! jq -c --arg run_id "${run_id}" --arg repo "${repo}" --arg count "${FINDINGS_COUNT}" --argjson purge_ok "${PURGE_OK}" \
+              '{run_id: $run_id, repo: $repo, findings_count: ($count | tonumber), purge_ok: $purge_ok, findings: [.[] | {rule: .RuleID, file: .File, line: .StartLine}]}' \
+              "${output_dir}/findings.json" >> "${SUMMARY_JSONL}"; then
+              echo "::warning::Failed to append findings for run ${run_id} (${repo}) to the summary -- leak was still detected and counted."
+              PROCESSING_FAILURES=$((PROCESSING_FAILURES + 1))
+              return 0
+            fi
+          }
 
           # Process substitution (not a trailing pipe) so the loop runs in
           # this shell, not a subshell -- otherwise FLAGGED/SKIPPED_SCANS
@@ -124,34 +186,13 @@ jobs:
             SLUG="${REPO//\//_}-${RUN_ID}"
             echo "::group::Auditing run ${RUN_ID} (${REPO})"
             OUTPUT_DIR="${AUDIT_DIR}/${SLUG}"
-            .github/scripts/scan-run-logs.sh "${RUN_ID}" "${OUTPUT_DIR}" "${REPO}"
-            # shellcheck disable=SC1091
-            source "${OUTPUT_DIR}/status.env"
-
-            if [[ "${SCAN_OK}" != "true" ]]; then
-              # Could not even fetch this run's logs -- must not be silently
-              # folded into "no leaks found", or an auth/permission problem
-              # would look identical to a clean audit.
-              SKIPPED_SCANS=$((SKIPPED_SCANS + 1))
-            elif [[ "${LEAKS_FOUND}" == "true" ]]; then
-              FLAGGED=$((FLAGGED + 1))
-              # A purge failure here means the exposure window for this run
-              # is still open on GitHub -- tracked separately from
-              # SKIPPED_SCANS (which means "never checked") since this run
-              # *was* checked and *did* find something, it just couldn't
-              # close the loop.
-              [[ "${PURGE_OK}" != "true" ]] && PURGE_FAILURES=$((PURGE_FAILURES + 1))
-              mkdir -p "${ALL_REDACTED_DIR}/${SLUG}"
-              cp -r "${OUTPUT_DIR}/redacted/." "${ALL_REDACTED_DIR}/${SLUG}/"
-              jq -c --arg run_id "${RUN_ID}" --arg repo "${REPO}" --arg count "${FINDINGS_COUNT}" --argjson purge_ok "${PURGE_OK}" \
-                '{run_id: $run_id, repo: $repo, findings_count: ($count | tonumber), purge_ok: $purge_ok, findings: [.[] | {rule: .RuleID, file: .File, line: .StartLine}]}' \
-                "${OUTPUT_DIR}/findings.json" >> "${SUMMARY_JSONL}"
-            fi
+            process_one_run "${RUN_ID}" "${REPO}" "${OUTPUT_DIR}" "${SLUG}"
             echo "::endgroup::"
           done < <(echo "${RUNS}" | jq -c '.[]')
 
           echo "flagged-count=${FLAGGED}" >> "$GITHUB_OUTPUT"
           echo "skipped-scans=${SKIPPED_SCANS}" >> "$GITHUB_OUTPUT"
+          echo "processing-failures=${PROCESSING_FAILURES}" >> "$GITHUB_OUTPUT"
           echo "purge-failures=${PURGE_FAILURES}" >> "$GITHUB_OUTPUT"
           echo "SUMMARY_JSONL=${SUMMARY_JSONL}" >> "$GITHUB_ENV"
           echo "ALL_REDACTED_DIR=${ALL_REDACTED_DIR}" >> "$GITHUB_ENV"
@@ -180,6 +221,7 @@ jobs:
           SKIPPED_TARGETS: ${{ steps.list.outputs.skipped-targets || '0' }}
           SKIPPED_SCANS: ${{ steps.scan.outputs.skipped-scans || '0' }}
           PURGE_FAILURES: ${{ steps.scan.outputs.purge-failures || '0' }}
+          PROCESSING_FAILURES: ${{ steps.scan.outputs.processing-failures || '0' }}
           DISCOVERY_FAILED: ${{ steps.list.outputs.discovery-failed || 'false' }}
           # 'skipped' (not just 'failure') when flagged-count is '0' -- the
           # upload step's own `if:` never runs it in that case. Only
@@ -220,6 +262,10 @@ jobs:
               echo ""
               echo ":rotating_light: **${PURGE_FAILURES}** flagged run(s) could not have their raw logs deleted -- the exposure window is **NOT** closed for those runs (see the tracking issue's \"Purged\" column)."
             fi
+            if [[ "${PROCESSING_FAILURES}" != "0" ]]; then
+              echo ""
+              echo ":warning: **${PROCESSING_FAILURES}** flagged run(s) were detected but couldn't be fully recorded (redacted-copy or summary write failed) -- they still count toward the total above, but may be missing from the tracking issue table or combined artifact."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
           echo "skipped-total=${SKIPPED_TOTAL}" >> "$GITHUB_OUTPUT"
 
@@ -229,6 +275,7 @@ jobs:
           [[ "${SKIPPED_TOTAL}" != "0" ]] && NOTIFY_PARTS+=("${SKIPPED_TOTAL} target(s)/run(s) not scanned (partial audit)")
           [[ "${DISCOVERY_FAILED}" == "true" ]] && NOTIFY_PARTS+=("cross-repo caller discovery failed (partial audit)")
           [[ "${PURGE_FAILURES}" != "0" ]] && NOTIFY_PARTS+=("${PURGE_FAILURES} run(s) with unclosed exposure window (purge failed)")
+          [[ "${PROCESSING_FAILURES}" != "0" ]] && NOTIFY_PARTS+=("${PROCESSING_FAILURES} run(s) detected but not fully recorded")
           # "${arr[*]}" with IFS set only honors the *first* IFS character
           # when joining, so a ", " separator needs an explicit printf join
           # instead.
