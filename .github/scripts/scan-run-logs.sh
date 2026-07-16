@@ -42,6 +42,11 @@
 # knows how results across one or many runs should be reported.
 set -euo pipefail
 
+# Everything this script writes directly (logs/, the raw gitleaks report,
+# the redacted copy) can contain real secrets -- don't inherit whatever
+# permissive umask the runner happens to default to.
+umask 077
+
 : "${GH_TOKEN:?GH_TOKEN is required}"
 RUN_ID="${1:?Usage: scan-run-logs.sh <run-id> <output-dir> [repo]}"
 OUTPUT_DIR="${2:?Usage: scan-run-logs.sh <run-id> <output-dir> [repo]}"
@@ -63,6 +68,13 @@ FINDINGS_JSON="${OUTPUT_DIR}/findings.json"
 # the trap. Never read by any caller; see the header comment on findings.json.
 FINDINGS_RAW_JSON="${OUTPUT_DIR}/findings-raw.json"
 STATUS_FILE="${OUTPUT_DIR}/status.env"
+# chmod 700 on top of umask 077: podman/gitleaks writes findings-raw.json as
+# a *container* process, which has its own umask unaffected by this script's
+# -- the directory's own restrictive mode is what actually keeps other
+# users on this (persistent, self-hosted) runner from reading into it,
+# regardless of what mode any individual file inside ends up with.
+mkdir -p "${OUTPUT_DIR}"
+chmod 700 "${OUTPUT_DIR}"
 mkdir -p "${LOGS_DIR}"
 
 # Only the redacted copy (built later, if there are findings) and the
@@ -80,6 +92,16 @@ cleanup_raw_logs() {
   rm -rf -- "${LOGS_DIR}" "${LOGS_ZIP}" "${FINDINGS_RAW_JSON}"
   if [[ "${REDACTION_COMPLETE:-false}" != "true" ]]; then
     rm -rf -- "${REDACTED_DIR:-}"
+  fi
+  # Every *normal* exit path above already writes STATUS_FILE before
+  # returning -- this only fires when something else entirely (unzip,
+  # podman, jq, cp, redact.py) killed the script via `set -e` first. Without
+  # this, STATUS_FILE would simply not exist, and the composite action's own
+  # scan-ok/leaks-found/purge-ok outputs would never get set at all -- not
+  # "false", just absent -- silently dropping the "could not scan" summary
+  # instead of reporting it.
+  if [[ ! -f "${STATUS_FILE}" ]]; then
+    { echo "SCAN_OK=false"; echo "LEAKS_FOUND=false"; echo "PURGE_OK=true"; echo "FINDINGS_COUNT=0"; } > "${STATUS_FILE}"
   fi
 }
 trap cleanup_raw_logs EXIT

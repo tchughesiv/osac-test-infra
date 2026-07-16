@@ -32,16 +32,35 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Scan run logs
-      id: scan
+    - name: Run scanner
+      id: run-scan
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         RUN_ID: ${{ inputs.run-id }}
       run: |
         OUTPUT_DIR="${RUNNER_TEMP}/scan-logs-${RUN_ID}"
+        # Set before calling the script, not after -- so this output is
+        # available to the next step even if the call below dies partway
+        # through under set -e.
+        echo "output-dir=${OUTPUT_DIR}" >> "$GITHUB_OUTPUT"
         "${GITHUB_ACTION_PATH}/../../scripts/scan-run-logs.sh" "${RUN_ID}" "${OUTPUT_DIR}"
 
+    # always(): scan-run-logs.sh's own EXIT trap guarantees status.env exists
+    # even after a hard failure inside the script (unzip/podman/jq/cp/
+    # redact.py dying under its `set -e`) -- but only this step actually
+    # running is what reads and publishes it. Without always() here, a
+    # failure in "Run scanner" above would skip this step entirely via the
+    # implicit success() AND, leaving scan-ok/leaks-found/purge-ok unset
+    # (not "false", just absent) and silently dropping the "could not scan"
+    # summary below along with every subsequent step that depends on them.
+    - name: Publish scan outputs
+      id: scan
+      if: always()
+      shell: bash
+      env:
+        OUTPUT_DIR: ${{ steps.run-scan.outputs.output-dir }}
+      run: |
         source "${OUTPUT_DIR}/status.env"
         echo "scan-ok=${SCAN_OK}" >> "$GITHUB_OUTPUT"
         echo "leaks-found=${LEAKS_FOUND}" >> "$GITHUB_OUTPUT"
@@ -54,7 +73,7 @@ runs:
         echo "output-dir=${OUTPUT_DIR}" >> "$GITHUB_OUTPUT"
 
     - name: Warn on job summary if scan could not run
-      if: steps.scan.outputs.scan-ok == 'false'
+      if: always() && steps.scan.outputs.scan-ok == 'false'
       shell: bash
       env:
         RUN_ID: ${{ inputs.run-id }}
