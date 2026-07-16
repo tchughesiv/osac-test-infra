@@ -100,13 +100,28 @@ DISCOVERY_FAILED=false
 if [[ "${HTTP_CODE}" != "200" ]] \
   || ! jq -e '.items | type == "array"' "${DISCOVER_RESP}" >/dev/null 2>&1 \
   || ! jq -e '.incomplete_results == false' "${DISCOVER_RESP}" >/dev/null 2>&1 \
-  || ! jq -e '.total_count <= 100' "${DISCOVER_RESP}" >/dev/null 2>&1; then
+  || ! jq -e '(.total_count | type) == "number" and .total_count >= 0 and .total_count <= 100' "${DISCOVER_RESP}" >/dev/null 2>&1; then
   echo "::warning::Cross-repo caller discovery failed (HTTP ${HTTP_CODE}, unexpected response shape, incomplete search results, or more than 100 matches); auditing only this repo's own runs this time."
   DISCOVERY_FAILED=true
 else
-  while IFS= read -r TARGET; do
-    TARGETS+=("${TARGET}")
-  done < <(jq -r '.items[]? | "\(.repository.full_name):\(.path | split("/") | last)"' "${DISCOVER_RESP}" | sort -u)
+  # Extracted to a file with its own explicitly-checked exit status, not
+  # piped straight into the while loop via process substitution: a jq
+  # runtime error partway through the stream (e.g. one malformed item)
+  # wouldn't fail the while loop at all under set -e -- process
+  # substitution's exit status isn't observed by the surrounding shell --
+  # so TARGETS could silently end up partial while DISCOVERY_FAILED stays
+  # false. `select(...)` also drops any item missing the fields the format
+  # string needs, rather than interpolating a literal "null" into TARGETS.
+  DISCOVER_TARGETS_FILE="${OUTPUT_DIR}/discover-targets.txt"
+  if ! jq -r '.items[]? | select(.repository.full_name != null and .path != null) | "\(.repository.full_name):\(.path | split("/") | last)"' "${DISCOVER_RESP}" \
+    | sort -u > "${DISCOVER_TARGETS_FILE}"; then
+    echo "::warning::Failed to extract discovery targets from search response; auditing only this repo's own runs this time."
+    DISCOVERY_FAILED=true
+  else
+    while IFS= read -r TARGET; do
+      TARGETS+=("${TARGET}")
+    done < "${DISCOVER_TARGETS_FILE}"
+  fi
 fi
 echo "Auditing ${#TARGETS[@]} target(s): ${TARGETS[*]}"
 echo "::endgroup::"
@@ -141,7 +156,7 @@ for TARGET in "${TARGETS[@]}"; do
   # within the lookback window.
   if [[ "${HTTP_CODE}" != "200" ]] \
     || ! jq -e '.workflow_runs | type == "array"' "${RESP_FILE}" >/dev/null 2>&1 \
-    || ! jq -e '.total_count <= 100' "${RESP_FILE}" >/dev/null 2>&1; then
+    || ! jq -e '(.total_count | type) == "number" and .total_count >= 0 and .total_count <= 100' "${RESP_FILE}" >/dev/null 2>&1; then
     echo "::warning::Could not list runs for ${TARGET} (HTTP ${HTTP_CODE}, unexpected response shape, or more than 100 runs), skipping."
     SKIPPED_TARGETS=$((SKIPPED_TARGETS + 1))
     continue
