@@ -494,19 +494,31 @@
       {
         "name": "workflow_name",
         "label": "Workflow",
-        "type": "custom",
-        "query": "All,VMaaS Tests,VMaaS Full Install,E2E Tests,E2E Full Install Tests",
-        "current": { "text": "All", "value": "All", "selected": true },
-        "options": [
-          { "text": "All", "value": "All", "selected": true },
-          { "text": "VMaaS Tests", "value": "VMaaS Tests", "selected": false },
-          { "text": "VMaaS Full Install", "value": "VMaaS Full Install", "selected": false },
-          { "text": "E2E Tests", "value": "E2E Tests", "selected": false },
-          { "text": "E2E Full Install Tests", "value": "E2E Full Install Tests", "selected": false }
-        ],
-        "includeAll": false,
+        "type": "query",
+        "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "workflow-api" },
+        "query": {
+          "queryType": "infinity",
+          "refId": "variable",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "http://127.0.0.1:9103/api/workflows",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "",
+          "columns": [
+            { "selector": "__text", "text": "__text", "type": "string" },
+            { "selector": "__value", "text": "__value", "type": "string" }
+          ]
+        },
+        "current": { "text": "All", "value": "All" },
+        "options": [],
+        "includeAll": true,
+        "allValue": "All",
         "multi": false,
-        "refresh": 0
+        "refresh": 1,
+        "regex": "",
+        "sort": 0,
+        "hide": 0
       },
       {
         "name": "job_type",
