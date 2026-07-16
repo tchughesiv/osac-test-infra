@@ -324,46 +324,6 @@ jobs:
           podman build --no-cache ${BUILD_ARGS} -t "${E2E_IMAGE}" -f Containerfile .
           rm -f ./osac-cli-bin
 
-      - name: Prepare cluster prerequisites
-        env:
-          KUBECONFIG: ${{ runner.temp }}/kubeconfig
-        run: |
-          # 1. Wait for CatalogSource to be READY (operators depend on it)
-          echo "Waiting for CatalogSource redhat-operators to be READY..."
-          oc wait --for=jsonpath='{.status.connectionState.lastObservedState}'=READY \
-            catalogsource/redhat-operators -n openshift-marketplace --timeout=300s
-          echo "CatalogSource is READY."
-
-          # 2. Patch OVN masquerade subnet to avoid networking conflicts
-          echo "Patching OVN masquerade subnet to 169.254.0.0/17..."
-          oc patch networks.operator.openshift.io cluster --type=merge \
-            -p '{"spec":{"defaultNetwork":{"ovnKubernetesConfig":{"gatewayConfig":{"ipv4":{"internalMasqueradeSubnet":"169.254.0.0/17"}}}}}}'
-          oc delete pod -n openshift-network-operator -l name=network-operator
-          echo "Waiting 180s for OVN to stabilize..."
-          sleep 180
-          oc rollout status ds/ovnkube-node -n openshift-ovn-kubernetes --timeout=300s
-          echo "OVN rollout complete."
-
-          # 3. Apply KubeletConfig to increase maxPods to 500
-          echo "Applying KubeletConfig (maxPods: 500)..."
-          cat <<'KUBELET_EOF' | oc apply -f -
-          apiVersion: machineconfiguration.openshift.io/v1
-          kind: KubeletConfig
-          metadata:
-            name: set-master-max-pods
-          spec:
-            machineConfigPoolSelector:
-              matchLabels:
-                pools.operator.machineconfiguration.openshift.io/master: ""
-            kubeletConfig:
-              maxPods: 500
-          KUBELET_EOF
-          echo "Waiting for MCP master to finish updating (node will reboot on SNO)..."
-          oc wait --for=condition=Updated mcp/master --timeout=600s
-          echo "Waiting 180s for MCP to settle..."
-          sleep 180
-          echo "Cluster prerequisites applied."
-
       - name: Install infrastructure operators
         env:
           KUBECONFIG: ${{ runner.temp }}/kubeconfig
