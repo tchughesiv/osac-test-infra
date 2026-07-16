@@ -248,6 +248,27 @@ find "${ARTIFACT_DIR}" -type f -name "*.log" -print0 \
 # Clean up empty files from failed log captures
 find "${ARTIFACT_DIR}" -type f -empty -delete || true
 
+# ── Failure Summary ─────────────────────────────────────────────────
+
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo "  Failure Summary (error / panic / fatal from gathered artifacts)"
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+
+SUMMARY=$(find "${ARTIFACT_DIR}" -type f \( -name "*.log" -o -name "*.txt" \) -print0 \
+    | xargs -0 grep -inE '(error|panic|fatal)' -C3 --with-filename 2>/dev/null) || true
+
+if [[ -n "${SUMMARY}" ]]; then
+    echo "${SUMMARY}"
+else
+    echo "  No error/panic/fatal patterns found in gathered artifacts."
+fi
+
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+
 FILE_COUNT=$(find "${ARTIFACT_DIR}" -type f | wc -l)
 TOTAL_SIZE=$(du -sh "${ARTIFACT_DIR}" | cut -f1)
 echo "Done. ${FILE_COUNT} files (${TOTAL_SIZE}) in ${ARTIFACT_DIR}"
