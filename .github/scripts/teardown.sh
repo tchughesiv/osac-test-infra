@@ -46,6 +46,16 @@ if [[ -n "${BMH_VM_NAMES:-}" ]]; then
   done
 fi
 
+if [[ -n "${BMH_POOL_NAME:-}" ]]; then
+  echo "Removing libvirt storage pool ${BMH_POOL_NAME}..."
+  virsh -c qemu:///system pool-destroy "${BMH_POOL_NAME}" 2>/dev/null || true
+  virsh -c qemu:///system pool-undefine "${BMH_POOL_NAME}" 2>/dev/null || true
+fi
+
+if [[ -n "${BMH_DISK_DIR:-}" ]] && [[ -d "${BMH_DISK_DIR}" ]]; then
+  rm -rf "${BMH_DISK_DIR}"
+fi
+
 if [[ -n "${SUSHY_PID_FILE:-}" ]] && [[ -f "${SUSHY_PID_FILE}" ]]; then
   echo "Stopping sushy-emulator..."
   kill "$(cat "${SUSHY_PID_FILE}")" 2>/dev/null || true

@@ -70,7 +70,13 @@ print(root.find('.//ip').get('address'))
 ")
 echo "Gateway IP (host): ${GW_IP}"
 
-# --- Step 3: Install and start sushy-tools ---
+# --- Step 3: Create libvirt storage pool for sushy-tools ---
+POOL_NAME="bmh-${CLONE_NAME}"
+echo "==> Creating libvirt storage pool '${POOL_NAME}'..."
+${VIRSH} pool-define-as "${POOL_NAME}" dir --target "${VM_DISK_DIR}"
+${VIRSH} pool-start "${POOL_NAME}"
+
+# --- Step 4: Install and start sushy-tools ---
 echo "==> Installing sushy-tools..."
 pip install --quiet sushy-tools libvirt-python 2>&1
 
@@ -82,6 +88,7 @@ SUSHY_EMULATOR_SSL_CERT = None
 SUSHY_EMULATOR_SSL_KEY = None
 SUSHY_EMULATOR_LIBVIRT_URI = "qemu:///system"
 SUSHY_EMULATOR_IGNORE_BOOT_DEVICE = False
+SUSHY_EMULATOR_STORAGE_POOL = "${POOL_NAME}"
 SUSHY_EMULATOR_BOOT_LOADER_MAP = {
     "UEFI": {
         "x86_64": "/usr/share/OVMF/OVMF_CODE.secboot.fd"
@@ -252,6 +259,8 @@ done
 # --- Export env vars for teardown ---
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   echo "BMH_VM_NAMES=${VM_NAMES}" >> "${GITHUB_ENV}"
+  echo "BMH_POOL_NAME=${POOL_NAME}" >> "${GITHUB_ENV}"
+  echo "BMH_DISK_DIR=${VM_DISK_DIR}" >> "${GITHUB_ENV}"
   echo "SUSHY_PID_FILE=${SUSHY_PID_FILE}" >> "${GITHUB_ENV}"
   echo "SUSHY_CONFIG_DIR=${SUSHY_CONFIG_DIR}" >> "${GITHUB_ENV}"
   echo "SUSHY_PORT=${SUSHY_PORT}" >> "${GITHUB_ENV}"
