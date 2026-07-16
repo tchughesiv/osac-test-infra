@@ -65,9 +65,11 @@ TARGETS=(
 # monorepo migration lands.
 #
 # per_page=100 without pagination: comfortably covers current scale (5
-# discovered callers org-wide); a real future-proofing gap if either the
-# caller list or a single repo's completed-run count within the lookback
-# window ever exceeds 100, deliberately deferred rather than fixed here.
+# discovered callers org-wide). Actually paginating is still deferred, but
+# exceeding 100 (or an incomplete search due to a server-side timeout) is
+# now at least detected and treated as DISCOVERY_FAILED=true below, rather
+# than silently returning a truncated/partial first page as if it were
+# the complete result.
 echo "::group::Discover cross-repo callers"
 DISCOVER_RESP="${OUTPUT_DIR}/discover.json"
 # `if ! VAR=$(...)`, not a plain assignment: a curl *transport* failure
@@ -79,7 +81,7 @@ if ! HTTP_CODE=$(curl -sL -o "${DISCOVER_RESP}" -w '%{http_code}' \
   --connect-timeout 10 --max-time 30 \
   -H "Authorization: Bearer ${GH_TOKEN}" \
   -H "Accept: application/vnd.github+json" \
-  "${GITHUB_API_URL}/search/code?q=${GITHUB_REPOSITORY}%2F.github%2Fworkflows%2Fe2e-vmaas+org:osac-project&per_page=100"); then
+  "${GITHUB_API_URL}/search/code?q=${GITHUB_REPOSITORY}%2F.github%2Fworkflows%2Fe2e-vmaas+org:osac-project+path:.github/workflows&per_page=100"); then
   HTTP_CODE="curl-transport-error"
 fi
 # Distinct from a single target's own run-listing call failing below: this
@@ -87,13 +89,19 @@ fi
 # can't be inferred from SKIPPED_TARGETS staying 0 -- the caller must check
 # this flag too, or a clean-looking audit could just be an incomplete one.
 DISCOVERY_FAILED=false
-# A 200 doesn't guarantee the body has the shape we expect -- `.items[]?`'s
-# `?` turns a missing/wrong-typed field into empty output just as readily as
-# a genuinely-empty result, so a malformed response (rate-limit body with a
-# 200, an API shape change, etc.) would otherwise look identical to "found
-# zero cross-repo callers" instead of a real discovery failure.
-if [[ "${HTTP_CODE}" != "200" ]] || ! jq -e '.items | type == "array"' "${DISCOVER_RESP}" >/dev/null 2>&1; then
-  echo "::warning::Cross-repo caller discovery failed (HTTP ${HTTP_CODE}, or unexpected response shape); auditing only this repo's own runs this time."
+# A 200 doesn't guarantee a *complete* result, on top of not guaranteeing
+# the expected *shape*: GitHub's code-search endpoint can return
+# incomplete_results=true (a documented behavior on internal search
+# timeout) with an otherwise well-formed, valid-array `.items` -- the shape
+# check alone wouldn't catch that. total_count > 100 is the pre-existing,
+# deliberately-deferred non-pagination gap made concrete: rather than
+# silently returning only the first page, treat exceeding it as a failure
+# too, so it's visible instead of quietly dropping callers.
+if [[ "${HTTP_CODE}" != "200" ]] \
+  || ! jq -e '.items | type == "array"' "${DISCOVER_RESP}" >/dev/null 2>&1 \
+  || ! jq -e '.incomplete_results == false' "${DISCOVER_RESP}" >/dev/null 2>&1 \
+  || ! jq -e '.total_count <= 100' "${DISCOVER_RESP}" >/dev/null 2>&1; then
+  echo "::warning::Cross-repo caller discovery failed (HTTP ${HTTP_CODE}, unexpected response shape, incomplete search results, or more than 100 matches); auditing only this repo's own runs this time."
   DISCOVERY_FAILED=true
 else
   while IFS= read -r TARGET; do
@@ -126,9 +134,15 @@ for TARGET in "${TARGETS[@]}"; do
   # Same "200 doesn't guarantee shape" reasoning as the discovery call above
   # -- an unexpected/missing .workflow_runs would otherwise become `[]` via
   # `?`, silently counting a target that actually has runs as cleanly
-  # audited instead of skipped.
-  if [[ "${HTTP_CODE}" != "200" ]] || ! jq -e '.workflow_runs | type == "array"' "${RESP_FILE}" >/dev/null 2>&1; then
-    echo "::warning::Could not list runs for ${TARGET} (HTTP ${HTTP_CODE}, or unexpected response shape), skipping."
+  # audited instead of skipped. Same total_count > 100 reasoning too: this
+  # endpoint returns total_count alongside workflow_runs just like the
+  # search endpoint does, so it's exposed to the identical
+  # non-pagination gap if a single target has more than 100 completed runs
+  # within the lookback window.
+  if [[ "${HTTP_CODE}" != "200" ]] \
+    || ! jq -e '.workflow_runs | type == "array"' "${RESP_FILE}" >/dev/null 2>&1 \
+    || ! jq -e '.total_count <= 100' "${RESP_FILE}" >/dev/null 2>&1; then
+    echo "::warning::Could not list runs for ${TARGET} (HTTP ${HTTP_CODE}, unexpected response shape, or more than 100 runs), skipping."
     SKIPPED_TARGETS=$((SKIPPED_TARGETS + 1))
     continue
   fi
