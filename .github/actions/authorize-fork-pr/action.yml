@@ -56,10 +56,14 @@ runs:
         echo "::endgroup::"
 
         echo "::group::Check org membership"
+        # URL-encode PR_AUTHOR -- bot accounts like "some-bot[bot]" contain
+        # characters (`[`, `]`) that make the URL invalid otherwise, which
+        # curl rejects outright (exit 3) before the request is even sent.
+        PR_AUTHOR_ENCODED=$(jq -rn --arg v "${PR_AUTHOR}" '$v|@uri')
         HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
           -H "Authorization: Bearer ${GH_TOKEN}" \
           -H "Accept: application/vnd.github+json" \
-          "https://api.github.com/orgs/osac-project/members/${PR_AUTHOR}")
+          "https://api.github.com/orgs/osac-project/members/${PR_AUTHOR_ENCODED}")
         if [[ "${HTTP_CODE}" == "204" ]]; then
           echo "Fork PR authorized: '${PR_AUTHOR}' is an osac-project org member."
           echo "::endgroup::"
