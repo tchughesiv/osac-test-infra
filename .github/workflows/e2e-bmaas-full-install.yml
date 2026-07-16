@@ -263,6 +263,12 @@ jobs:
           sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/kubeconfig"
           chmod 600 "$RUNNER_TEMP/kubeconfig"
 
+      - name: Setup virtual BareMetalHosts
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+          BMH_NAMESPACE: ${{ inputs.bmh-namespace }}
+        run: bash .github/scripts/setup-virtual-bmh.sh
+
       - name: Build and load component image
         if: inputs.component-repo != ''
         env:
@@ -490,12 +496,6 @@ jobs:
               oc rollout status "${deploy}" -n "${INSTALLER_NAMESPACE}" --timeout=300s
             done
           fi
-
-      - name: Setup virtual BareMetalHosts
-        env:
-          KUBECONFIG: ${{ runner.temp }}/kubeconfig
-          BMH_NAMESPACE: ${{ inputs.bmh-namespace }}
-        run: bash .github/scripts/setup-virtual-bmh.sh
 
       - name: Run E2E tests
         id: test
