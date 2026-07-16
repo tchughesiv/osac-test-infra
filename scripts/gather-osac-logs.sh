@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Collect OSAC cluster diagnostics and redact sensitive data.
+# Collect OSAC cluster diagnostics, redact sensitive data, and surface failure patterns.
 #
 # Usage:
 #   KUBECONFIG=/path/to/kubeconfig ./scripts/gather-osac-logs.sh [output-dir]
@@ -250,24 +250,37 @@ find "${ARTIFACT_DIR}" -type f -empty -delete || true
 
 # ── Failure Summary ─────────────────────────────────────────────────
 
-echo ""
-echo "════════════════════════════════════════════════════════════════"
-echo "  Failure Summary (error / panic / fatal from gathered artifacts)"
-echo "════════════════════════════════════════════════════════════════"
-echo ""
-
-SUMMARY=$(find "${ARTIFACT_DIR}" -type f \( -name "*.log" -o -name "*.txt" \) -print0 \
-    | xargs -0 grep -inE '(error|panic|fatal)' -C3 --with-filename 2>/dev/null) || true
-
-if [[ -n "${SUMMARY}" ]]; then
-    echo "${SUMMARY}"
-else
-    echo "  No error/panic/fatal patterns found in gathered artifacts."
+FAILURE_SUMMARY="${ARTIFACT_DIR}/failure-summary.txt"
+{
+echo "=== Failure Summary (error/panic/fatal/failed/unreachable) ==="
+found=0
+total_lines=0
+MAX_SUMMARY_LINES=1000
+while IFS= read -r -d '' f; do
+    [[ ${total_lines} -ge ${MAX_SUMMARY_LINES} ]] && break
+    matches=$(grep -inE --color=never -B1 -A3 \
+        '\b(error|panic|fatal|failed|unreachable)\b' "$f" 2>/dev/null \
+        | grep -vE '\b(failed|unreachable)=0\b') || continue
+    # Skip files where filtering removed all actual matches, leaving only context lines
+    echo "$matches" | grep -qE '^[0-9]+:' || continue
+    echo ""
+    echo "--- ${f#"${ARTIFACT_DIR}"/} ---"
+    remaining=$((MAX_SUMMARY_LINES - total_lines))
+    echo "$matches" | head -"${remaining}"
+    match_lines=$(echo "$matches" | wc -l)
+    total_lines=$((total_lines + (match_lines < remaining ? match_lines : remaining)))
+    found=1
+done < <(find "${ARTIFACT_DIR}" -type f \( -name '*.log' -o -name '*.txt' \) \
+    ! -name 'failure-summary.txt' -print0 | sort -z)
+if [[ ${total_lines} -ge ${MAX_SUMMARY_LINES} ]]; then
+    echo ""
+    echo "... truncated at ${MAX_SUMMARY_LINES} lines — see artifacts for full logs"
 fi
-
-echo ""
-echo "════════════════════════════════════════════════════════════════"
-echo ""
+if [[ ${found} -eq 0 ]]; then
+    echo "No error/panic/fatal/failed/unreachable patterns found in collected artifacts."
+fi
+echo "=== End Failure Summary ==="
+} | tee "${FAILURE_SUMMARY}"
 
 FILE_COUNT=$(find "${ARTIFACT_DIR}" -type f | wc -l)
 TOTAL_SIZE=$(du -sh "${ARTIFACT_DIR}" | cut -f1)
