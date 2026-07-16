@@ -189,8 +189,31 @@ jobs:
             return 0
           }
 
-          # Process substitution (not a trailing pipe) so the loop runs in
-          # this shell, not a subshell -- otherwise FLAGGED/SKIPPED_SCANS
+          # Validate + materialize RUNS *before* the loop. Feeding
+          # `jq -c '.[]'` via process substitution hides parse/schema
+          # failures (jq exits non-zero in the process-sub shell while
+          # this shell sees an empty stream and happily "audits" zero
+          # runs). Fail the step outright on a bad payload instead.
+          # Validate separately from materialize: `jq -e` + `.[]` would
+          # also reject a legitimate empty array (no output => -e fails).
+          VALIDATED_RUNS="${AUDIT_DIR}/runs.validated.jsonl"
+          if ! echo "${RUNS}" | jq -e '
+            (type == "array")
+            and all(
+              (type == "object")
+              and ((.run_id | type == "string") or (.run_id | type == "number"))
+              and ((.run_id | tostring | length) > 0)
+              and (.repo | type == "string")
+              and (.repo | length > 0)
+            )
+          ' >/dev/null; then
+            echo "::error::Invalid RUNS input -- refusing to audit with an unverified run list"
+            exit 1
+          fi
+          echo "${RUNS}" | jq -c '.[] | {run_id: (.run_id | tostring), repo}' > "${VALIDATED_RUNS}"
+
+          # Reading a file (not a trailing pipe) so the loop runs in this
+          # shell, not a subshell -- otherwise FLAGGED/SKIPPED_SCANS
           # wouldn't survive past the loop.
           while IFS= read -r ITEM; do
             RUN_ID=$(echo "${ITEM}" | jq -r '.run_id')
@@ -208,7 +231,7 @@ jobs:
               echo "::warning::process_one_run returned non-zero unexpectedly for run ${RUN_ID} (${REPO})"
             fi
             echo "::endgroup::"
-          done < <(echo "${RUNS}" | jq -c '.[]')
+          done < "${VALIDATED_RUNS}"
 
           echo "flagged-count=${FLAGGED}" >> "$GITHUB_OUTPUT"
           echo "skipped-scans=${SKIPPED_SCANS}" >> "$GITHUB_OUTPUT"

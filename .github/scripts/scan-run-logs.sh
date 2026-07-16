@@ -183,7 +183,10 @@ GITLEAKS_IMAGE="ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60
 # Deliberately no --redact/--verbose: this job's own console output must
 # never print the raw secret, but the JSON report needs the real value (not
 # gitleaks' "REDACTED" placeholder) so redact.py can find-and-replace it.
-podman run --rm \
+# --network=none: raw logs and the unredacted JSON report stay on this
+# host; a compromised/malicious scanner image must not be able to
+# exfiltrate them over the network.
+podman run --rm --network=none \
   -v "${LOGS_DIR}:/logs:ro,Z" \
   -v "${GITLEAKS_CONFIG}:/gitleaks.toml:ro,Z" \
   -v "${OUTPUT_DIR}:/out:Z" \

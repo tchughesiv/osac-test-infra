@@ -104,11 +104,15 @@ jobs:
         with:
           status: failure
           workflow-name: ${{ github.event.workflow_run.name }}
-          # Order matters: purge-ok=false now covers both "leak found but
+          # Order matters: purge-ok=false covers both "leak found but
           # delete failed" and "scan failed after fetch" (raw logs remain).
-          # Distinguish those via leaks-found before falling through to the
-          # plain fetch-failure message (scan-ok=false + purge-ok=true).
-          failed-step: "${{ steps.scan.outputs.leaks-found == 'true' && steps.scan.outputs.purge-ok == 'false' && 'Credential(s) detected, but raw logs could not be deleted -- exposure window is still open, immediate remediation required' || steps.scan.outputs.scan-ok == 'false' && steps.scan.outputs.purge-ok == 'false' && 'Scan failed after logs were fetched -- raw logs may still be on GitHub, check run logs' || steps.scan.outcome == 'failure' && 'Scan/purge action failed unexpectedly -- see run logs' || steps.scan.outputs.leaks-found == 'true' && format('Credential(s) detected in run logs ({0} finding(s))', steps.scan.outputs.findings-count) || 'Could not fetch run logs to scan for leaked credentials' }}"
+          # leaks-found + action failure must beat the generic
+          # outcome==failure branch -- otherwise an artifact-upload /
+          # summary failure after detection hides the credential incident
+          # behind a generic Slack message. Successful scans with findings
+          # (outcome==success) still fall through to the plain detected
+          # message; fetch-only failures are last.
+          failed-step: "${{ steps.scan.outputs.leaks-found == 'true' && steps.scan.outputs.purge-ok == 'false' && 'Credential(s) detected, but raw logs could not be deleted -- exposure window is still open, immediate remediation required' || steps.scan.outputs.scan-ok == 'false' && steps.scan.outputs.purge-ok == 'false' && 'Scan failed after logs were fetched -- raw logs may still be on GitHub, check run logs' || steps.scan.outputs.leaks-found == 'true' && steps.scan.outcome == 'failure' && format('Credential(s) detected in run logs ({0} finding(s)); scan action also failed -- see run logs', steps.scan.outputs.findings-count) || steps.scan.outcome == 'failure' && 'Scan/purge action failed unexpectedly -- see run logs' || steps.scan.outputs.leaks-found == 'true' && format('Credential(s) detected in run logs ({0} finding(s))', steps.scan.outputs.findings-count) || 'Could not fetch run logs to scan for leaked credentials' }}"
           slack-webhook-url: ${{ steps.vault.outputs.SLACK_WEBHOOK_URL }}
           workflow-url: ${{ github.event.workflow_run.html_url }}
           branch-name: ${{ github.event.workflow_run.head_branch }}
