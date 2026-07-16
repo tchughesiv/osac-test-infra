@@ -260,14 +260,14 @@ while IFS= read -r -d '' f; do
     [[ ${total_lines} -ge ${MAX_SUMMARY_LINES} ]] && break
     matches=$(grep -inE --color=never -B1 -A3 \
         '\b(error|panic|fatal|failed|unreachable)\b' "$f" 2>/dev/null \
-        | grep -vE '\b(failed|unreachable)=0\b') || continue
+        | grep -ivE '\b(failed|unreachable)=0\b') || continue
     # Skip files where filtering removed all actual matches, leaving only context lines
-    echo "$matches" | grep -qE '^[0-9]+:' || continue
+    printf '%s\n' "$matches" | grep -qE '^[0-9]+:' || continue
     echo ""
     echo "--- ${f#"${ARTIFACT_DIR}"/} ---"
     remaining=$((MAX_SUMMARY_LINES - total_lines))
-    echo "$matches" | head -"${remaining}"
-    match_lines=$(echo "$matches" | wc -l)
+    printf '%s\n' "$matches" | head -n "${remaining}"
+    match_lines=$(printf '%s\n' "$matches" | wc -l)
     total_lines=$((total_lines + (match_lines < remaining ? match_lines : remaining)))
     found=1
 done < <(find "${ARTIFACT_DIR}" -type f \( -name '*.log' -o -name '*.txt' \) \
