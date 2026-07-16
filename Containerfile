@@ -4,7 +4,7 @@ ARG GRPCURL_VERSION=1.9.1
 ARG OSAC_VERSION=""
 ARG OSAC_CLI_BIN=""
 
-RUN dnf install -y python3.11 python3.11-pip make jq && dnf clean all
+RUN dnf install -y python3.11 python3.11-pip make jq openssh-clients && dnf clean all
 
 RUN curl -Lsf "https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/stable/openshift-client-linux.tar.gz" \
     | tar xz --no-same-owner -C /usr/local/bin oc kubectl

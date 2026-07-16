@@ -22,3 +22,6 @@ reports/
 
 # Infrastructure backend outputs
 infra/*/.env.infra
+
+# Workflow artifacts
+.artifacts/

@@ -1,6 +1,6 @@
 REPORTS_DIR ?= reports
 
-.PHONY: test lint format test-vmaas test-caas test-storage
+.PHONY: test lint format test-vmaas test-caas test-storage test-bmaas
 
 test:
 	mkdir -p $(REPORTS_DIR)
@@ -24,6 +24,10 @@ test-caas:
 test-storage:
 	mkdir -p $(REPORTS_DIR)
 	pytest tests/storage/ -v $(if $(TEST),-k "$(TEST)") --junitxml=$(REPORTS_DIR)/storage.xml
+
+test-bmaas:
+	mkdir -p $(REPORTS_DIR)
+	pytest tests/bmaas/ -v $(if $(TEST),-k "$(TEST)") --junitxml=$(REPORTS_DIR)/bmaas.xml
 
 # ─── Infrastructure orchestration ───────────────────────────────────
 
