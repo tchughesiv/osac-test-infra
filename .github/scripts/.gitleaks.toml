@@ -1,0 +1,41 @@
+[extend]
+  # Layer this allowlist on top of gitleaks' bundled default rules instead
+  # of replacing them entirely -- a config file without this line is a full
+  # ruleset override, which would silently disable all detection.
+  useDefault = true
+
+# No allowlist entries yet. This config is used by
+# .github/actions/scan-and-purge-logs to scan e2e workflow run logs (OSAC-1684).
+# Add regexes here as real false positives are found in practice (e.g. from
+# audit-workflow-logs.yml runs) -- cluster diagnostic output (UIDs, image
+# digests, etc.) is a different shape of text than source code, so the
+# false-positive profile may differ from a source-scanning config.
+#
+# Sample entries for reference -- uncomment/adapt once a real false positive
+# is confirmed (don't add speculative entries without a concrete example,
+# since an overly broad regex/path here would suppress real leaks too):
+#
+# [[allowlists]]
+#   description = "Known false positives from scanning e2e run logs"
+#
+#   # Skip specific files/paths entirely (glob or regex), e.g. a log file
+#   # that's expected to contain non-secret high-entropy content.
+#   paths = [
+#     '''cnv/hyperconverged\.yaml''',
+#   ]
+#
+#   # Skip exact matched values, e.g. a fixed dev-only credential that is
+#   # intentionally not a real secret.
+#   regexes = [
+#     '''REPLACE-WITH-THE-EXACT-FALSE-POSITIVE-VALUE''',
+#   ]
+#
+#   # Skip specific commits (rarely needed here since this config scans
+#   # plain log files, not git history).
+#   commits = [
+#     "0000000000000000000000000000000000000000",
+#   ]
+#
+# Note: [[allowlists]] (plural, array-of-tables) is the current syntax as of
+# gitleaks v8.25.0, replacing the deprecated singular [allowlist]. The two
+# cannot be mixed in the same file.

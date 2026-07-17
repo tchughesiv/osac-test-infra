@@ -1,0 +1,157 @@
+---
+name: Scan and purge workflow run logs
+description: >-
+  Scan a single workflow run's logs for leaked credentials with gitleaks
+  (via scripts/scan-run-logs.sh). On a match: upload a redacted copy as an
+  artifact, warn on the job summary, and delete the raw logs to close the
+  exposure window (OSAC-1684).
+
+inputs:
+  run-id:
+    description: "Workflow run ID to scan (defaults to the current run)"
+    required: false
+    default: ${{ github.run_id }}
+  github-token:
+    description: "Token with actions:write on this repo (to fetch and delete run logs)"
+    required: true
+
+outputs:
+  scan-ok:
+    description: "'false' if the scan did not complete (fetch failed, or a post-fetch step like unzip/podman/redact failed) -- do not treat this the same as a clean scan"
+    value: ${{ steps.scan.outputs.scan-ok }}
+  leaks-found:
+    description: "'true' if gitleaks found any secrets in the run's logs"
+    value: ${{ steps.scan.outputs.leaks-found }}
+  purge-ok:
+    description: "'false' if raw logs may still be on GitHub -- either leaks were found but the delete call failed, or the scan failed after a successful fetch (never reached delete). 'true' with scan-ok='false' means the fetch itself failed (nothing was downloaded)"
+    value: ${{ steps.scan.outputs.purge-ok }}
+  findings-count:
+    description: "Number of findings (0 if none)"
+    value: ${{ steps.scan.outputs.findings-count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run scanner
+      id: run-scan
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        RUN_ID: ${{ inputs.run-id }}
+      run: |
+        OUTPUT_DIR="${RUNNER_TEMP}/scan-logs-${RUN_ID}"
+        # Set before calling the script, not after -- so this output is
+        # available to the next step even if the call below dies partway
+        # through under set -e.
+        echo "output-dir=${OUTPUT_DIR}" >> "$GITHUB_OUTPUT"
+        "${GITHUB_ACTION_PATH}/../../scripts/scan-run-logs.sh" "${RUN_ID}" "${OUTPUT_DIR}"
+
+    # always(): scan-run-logs.sh's own EXIT trap guarantees status.env exists
+    # even after a hard failure inside the script (unzip/podman/jq/cp/
+    # redact.py dying under its `set -e`) -- but only this step actually
+    # running is what reads and publishes it. Without always() here, a
+    # failure in "Run scanner" above would skip this step entirely via the
+    # implicit success() AND, leaving scan-ok/leaks-found/purge-ok unset
+    # (not "false", just absent) and silently dropping the "could not scan"
+    # summary below along with every subsequent step that depends on them.
+    - name: Publish scan outputs
+      id: scan
+      if: always()
+      shell: bash
+      env:
+        OUTPUT_DIR: ${{ steps.run-scan.outputs.output-dir }}
+      run: |
+        source "${OUTPUT_DIR}/status.env"
+        echo "scan-ok=${SCAN_OK}" >> "$GITHUB_OUTPUT"
+        echo "leaks-found=${LEAKS_FOUND}" >> "$GITHUB_OUTPUT"
+        echo "purge-ok=${PURGE_OK}" >> "$GITHUB_OUTPUT"
+        echo "findings-count=${FINDINGS_COUNT}" >> "$GITHUB_OUTPUT"
+        # Step output, not $GITHUB_ENV: an env var here would leak into every
+        # later step of the *calling* job (not just this action's own steps),
+        # and would collide if this action is ever invoked more than once in
+        # the same job.
+        echo "output-dir=${OUTPUT_DIR}" >> "$GITHUB_OUTPUT"
+
+    - name: Warn on job summary if scan could not run
+      if: always() && steps.scan.outputs.scan-ok == 'false'
+      shell: bash
+      env:
+        RUN_ID: ${{ inputs.run-id }}
+        REPO: ${{ github.repository }}
+        SERVER_URL: ${{ github.server_url }}
+        PURGE_OK: ${{ steps.scan.outputs.purge-ok }}
+      run: |
+        {
+          echo "## :warning: Could not scan logs for leaked credentials"
+          echo ""
+          # purge-ok=true with scan-ok=false means the fetch itself failed
+          # (nothing downloaded). purge-ok=false means we got past fetch
+          # and then failed -- raw logs are still on GitHub.
+          if [[ "${PURGE_OK}" == "true" ]]; then
+            echo "Failed to fetch logs for run [${RUN_ID}](${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}) -- this is **not** the same as a clean scan; the logs were never actually checked."
+          else
+            echo "Scan of run [${RUN_ID}](${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}) failed after the logs were fetched (e.g. unzip/gitleaks/redact) -- this is **not** the same as a clean scan."
+            echo ""
+            echo "- :warning: **Raw logs for this run may still be on GitHub** -- the scan never reached the delete/purge step. Check the run logs and delete manually if needed (\`gh api -X DELETE repos/${REPO}/actions/runs/${RUN_ID}/logs\`)."
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload redacted logs artifact
+      id: upload
+      if: steps.scan.outputs.leaks-found == 'true'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: redacted-logs-${{ inputs.run-id }}
+        path: ${{ steps.scan.outputs.output-dir }}/redacted
+        retention-days: 30
+        # A missing/empty redacted dir here means something is wrong with an
+        # already-confirmed leak -- fail loudly instead of the default warn,
+        # which is easy to miss in job logs.
+        if-no-files-found: error
+
+    # always(): a bare `if: leaks-found == 'true'` implicitly ANDs with
+    # success(), so a hard failure in the artifact-upload step above would
+    # silently skip the very notification meant to report the leak.
+    - name: Warn on job summary
+      if: always() && steps.scan.outputs.leaks-found == 'true'
+      shell: bash
+      env:
+        RUN_ID: ${{ inputs.run-id }}
+        REPO: ${{ github.repository }}
+        SERVER_URL: ${{ github.server_url }}
+        FINDINGS_COUNT: ${{ steps.scan.outputs.findings-count }}
+        PURGE_OK: ${{ steps.scan.outputs.purge-ok }}
+        OUTPUT_DIR: ${{ steps.scan.outputs.output-dir }}
+        UPLOAD_OK: ${{ steps.upload.outcome == 'success' }}
+      run: |
+        {
+          echo "## :rotating_light: Leaked credential(s) detected in run logs"
+          echo ""
+          echo "gitleaks found **${FINDINGS_COUNT}** potential secret(s) in the logs for run [${RUN_ID}](${SERVER_URL}/${REPO}/actions/runs/${RUN_ID})."
+          echo ""
+          # Never unconditionally claim the raw logs were deleted -- the
+          # delete call itself can fail (permissions, API hiccup, etc.), in
+          # which case the exposure window is still open and that must be
+          # visible here, not just in a job-log ::warning:: that's easy to miss.
+          if [[ "${PURGE_OK}" == "true" ]]; then
+            echo "- The raw logs for this run have been deleted to close the exposure window."
+          else
+            echo "- :warning: **Failed to delete the raw logs for this run** -- the exposure window is **NOT** closed; the raw logs are still on GitHub. Delete them manually (\`gh api -X DELETE repos/${REPO}/actions/runs/${RUN_ID}/logs\`) or re-run this scan."
+          fi
+          # Don't unconditionally claim the artifact is there -- the upload
+          # step above can itself fail (including via its own
+          # if-no-files-found: error), and this step still runs regardless
+          # via always().
+          if [[ "${UPLOAD_OK}" == "true" ]]; then
+            echo "- A redacted copy is attached as the \`redacted-logs-${RUN_ID}\` artifact for debugging."
+          else
+            echo "- :warning: **Failed to upload the redacted-logs artifact** -- no redacted copy is attached; check the run logs for the upload step's failure."
+          fi
+          echo "- Rotate any credential(s) below that are real (not test/dev-only values)."
+          echo ""
+          echo "| Rule | File | Line |"
+          echo "|---|---|---|"
+          # Escape literal `|` in RuleID/File so a pipe in a log path can't
+          # break the rendered Markdown table.
+          jq -r '.[] | "| \(.RuleID | gsub("\\|"; "\\|")) | \(.File | gsub("\\|"; "\\|")) | \(.StartLine) |"' "${OUTPUT_DIR}/findings.json"
+        } >> "$GITHUB_STEP_SUMMARY"

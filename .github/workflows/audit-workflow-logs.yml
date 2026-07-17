@@ -1,0 +1,439 @@
+---
+name: Audit workflow logs
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      lookback-hours:
+        description: "Re-scan completed e2e runs updated (completed) in the last N hours"
+        required: false
+        default: "25"
+
+concurrency:
+  group: audit-workflow-logs
+  cancel-in-progress: false
+
+# Deny-by-default at the workflow level, so a future job added to this file
+# without its own explicit `permissions:` block gets nothing rather than a
+# broad implicit GITHUB_TOKEN scope -- the job below already sets its own
+# least-privilege block regardless, this is just the safety net for later.
+permissions: {}
+
+jobs:
+  audit:
+    name: Cross-repo credential audit
+    # workflow_dispatch lets anyone with write access pick *any* branch to
+    # run this job against, executing that branch's own copy of this file
+    # with this job's full Vault/GH_ORG_TOKEN access -- a same-file `if:`
+    # guard can't close that gap, since an attacker dispatching against
+    # their own branch controls that exact file and would just remove the
+    # guard in their copy. Restricting the "audit-privileged" environment's
+    # deployment branches to `main` (Settings -> Environments, org-admin
+    # action -- see PR #182's follow-up item) is enforced server-side
+    # regardless of the dispatched branch's file content, so it's a real
+    # boundary rather than a cosmetic one. schedule: always runs off the
+    # default branch already; this only actually changes workflow_dispatch.
+    environment: audit-privileged
+    # Vault is only reachable at 127.0.0.1 from the osac-ci runners
+    # themselves, so this must run there to fetch secrets -- even though the
+    # scan itself needs no cluster access.
+    runs-on: osac-ci
+    permissions:
+      # Only needed to check out the shared scripts (scan-run-logs.sh,
+      # discover-e2e-runs.sh) this job invokes -- this job never pushes
+      # back to the repo.
+      contents: read  # checkout only, no push
+      # The tracking issue lives in this repo, so issues:write is enough at
+      # the job-permissions level for that part. Cross-repo run listing and
+      # log fetch/delete use the org-scoped GH_ORG_TOKEN from Vault instead
+      # (see "Scan each run's logs" below), not this job's own token.
+      issues: write  # create/update the credential-leak tracking issue
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      # --- Secret bootstrap (inline — must not run PR-controlled code) ---
+      - name: Read AppRole credentials
+        id: approle
+        run: |
+          APPROLE_DIR="${HOME}/.vault-server/.approle"
+          echo "role-id=$(cat "${APPROLE_DIR}/role-id")" >> "$GITHUB_OUTPUT"
+          echo "::add-mask::$(cat "${APPROLE_DIR}/secret-id")"
+          echo "secret-id=$(cat "${APPROLE_DIR}/secret-id")" >> "$GITHUB_OUTPUT"
+
+      - name: Retrieve secrets from Vault
+        id: vault
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4
+        with:
+          url: http://127.0.0.1:8200
+          method: approle
+          roleId: ${{ steps.approle.outputs.role-id }}
+          secretId: ${{ steps.approle.outputs.secret-id }}
+          exportEnv: false
+          secrets: |
+            secret/data/osac/e2e/github-token token | GH_ORG_TOKEN ;
+            secret/data/osac/e2e/slack-webhook-url url | SLACK_WEBHOOK_URL
+
+      - name: List recent e2e runs
+        id: list
+        env:
+          GH_TOKEN: ${{ steps.vault.outputs.GH_ORG_TOKEN }}
+          LOOKBACK_HOURS: ${{ inputs.lookback-hours || '25' }}
+        run: |
+          OUTPUT_DIR="${RUNNER_TEMP}/discover"
+          .github/scripts/discover-e2e-runs.sh "${LOOKBACK_HOURS}" "${OUTPUT_DIR}"
+          # shellcheck disable=SC1091
+          source "${OUTPUT_DIR}/status.env"
+
+          echo "runs=$(cat "${OUTPUT_DIR}/runs.json")" >> "$GITHUB_OUTPUT"
+          # Listing failures mean we never even knew about some runs, so they
+          # can never show up as scan failures below -- tracked separately so
+          # a partial audit still can't quietly report as a clean pass.
+          echo "skipped-targets=${SKIPPED_TARGETS}" >> "$GITHUB_OUTPUT"
+          # Discovery failing outright is distinct from skipped-targets above
+          # (which stays 0 in that case, since the loop only ran over this
+          # repo's own baseline targets) -- surfaced separately so it isn't
+          # silently invisible to the summary/notify steps below.
+          echo "discovery-failed=${DISCOVERY_FAILED}" >> "$GITHUB_OUTPUT"
+
+      - name: Scan each run's logs
+        id: scan
+        env:
+          GH_TOKEN: ${{ steps.vault.outputs.GH_ORG_TOKEN }}
+          RUNS: ${{ steps.list.outputs.runs }}
+        run: |
+          AUDIT_DIR="${RUNNER_TEMP}/audit"
+          ALL_REDACTED_DIR="${RUNNER_TEMP}/all-redacted"
+          SUMMARY_JSONL="${AUDIT_DIR}/summary.jsonl"
+          mkdir -p "${AUDIT_DIR}" "${ALL_REDACTED_DIR}"
+          : > "${SUMMARY_JSONL}"
+          FLAGGED=0
+          SKIPPED_SCANS=0
+          PURGE_FAILURES=0
+          PROCESSING_FAILURES=0
+
+          # A single run's processing (scan-run-logs.sh itself, or the
+          # cp/jq calls below) must not be able to abort this whole step --
+          # under this run: block's default set -e, an unguarded failure on
+          # run N would skip every run after it *and* lose the
+          # flagged-count/etc. outputs entirely, silently dropping any
+          # leaks already found on runs 1..N-1 from ever being reported.
+          # Calling this via `if ! process_one_run; then` (not a plain call)
+          # is what actually suspends errexit for the whole function body,
+          # not just the final status check -- every command inside runs to
+          # completion regardless of an earlier one failing, so each step
+          # can be individually checked instead of the function dying
+          # partway through. FLAGGED/SKIPPED_SCANS/etc. are deliberately
+          # not `local` so updates here are visible after the loop.
+          process_one_run() {
+            local run_id="$1" repo="$2" output_dir="$3" slug="$4"
+            if ! .github/scripts/scan-run-logs.sh "${run_id}" "${output_dir}" "${repo}"; then
+              echo "::warning::scan-run-logs.sh failed unexpectedly for run ${run_id} (${repo})"
+              SKIPPED_SCANS=$((SKIPPED_SCANS + 1))
+              return 0
+            fi
+            if [[ ! -f "${output_dir}/status.env" ]]; then
+              echo "::warning::status.env missing after scan-run-logs.sh for run ${run_id} (${repo})"
+              SKIPPED_SCANS=$((SKIPPED_SCANS + 1))
+              return 0
+            fi
+            # shellcheck disable=SC1091
+            source "${output_dir}/status.env"
+
+            if [[ "${SCAN_OK}" != "true" ]]; then
+              # Could not even fetch this run's logs -- must not be silently
+              # folded into "no leaks found", or an auth/permission problem
+              # would look identical to a clean audit.
+              SKIPPED_SCANS=$((SKIPPED_SCANS + 1))
+              return 0
+            fi
+            if [[ "${LEAKS_FOUND}" != "true" ]]; then
+              return 0
+            fi
+
+            FLAGGED=$((FLAGGED + 1))
+            # A purge failure here means the exposure window for this run
+            # is still open on GitHub -- tracked separately from
+            # SKIPPED_SCANS (which means "never checked") since this run
+            # *was* checked and *did* find something, it just couldn't
+            # close the loop.
+            [[ "${PURGE_OK}" != "true" ]] && PURGE_FAILURES=$((PURGE_FAILURES + 1))
+            # cp and jq are independent of each other -- the redacted-copy
+            # artifact vs. the tracking-issue summary entry -- so a failed
+            # cp must not skip the jq attempt too; only count this run once
+            # under PROCESSING_FAILURES even if both happen to fail.
+            local run_processing_failed=0
+            mkdir -p "${ALL_REDACTED_DIR}/${slug}"
+            if ! cp -r "${output_dir}/redacted/." "${ALL_REDACTED_DIR}/${slug}/"; then
+              echo "::warning::Failed to copy redacted logs for run ${run_id} (${repo}) into the combined artifact -- leak was still detected and counted."
+              run_processing_failed=1
+            fi
+            if ! jq -c --arg run_id "${run_id}" --arg repo "${repo}" --arg count "${FINDINGS_COUNT}" --argjson purge_ok "${PURGE_OK}" \
+              '{run_id: $run_id, repo: $repo, findings_count: ($count | tonumber), purge_ok: $purge_ok, findings: [.[] | {rule: .RuleID, file: .File, line: .StartLine}]}' \
+              "${output_dir}/findings.json" >> "${SUMMARY_JSONL}"; then
+              echo "::warning::Failed to append findings for run ${run_id} (${repo}) to the summary -- leak was still detected and counted."
+              run_processing_failed=1
+            fi
+            [[ "${run_processing_failed}" -eq 1 ]] && PROCESSING_FAILURES=$((PROCESSING_FAILURES + 1))
+            # Explicit, unconditional return: without this, the function's
+            # exit status is whatever the `[[ ... ]] && ...` line above
+            # evaluated to, which is 1 (false) on the common/successful path
+            # (run_processing_failed=0). Called as a bare statement below
+            # under this step's default `set -e`, that would abort the
+            # entire loop after the very first cleanly-processed flagged run
+            # -- silently skipping every remaining run.
+            return 0
+          }
+
+          # Validate + materialize RUNS *before* the loop. Feeding
+          # `jq -c '.[]'` via process substitution hides parse/schema
+          # failures (jq exits non-zero in the process-sub shell while
+          # this shell sees an empty stream and happily "audits" zero
+          # runs). Fail the step outright on a bad payload instead.
+          # Validate separately from materialize: `jq -e` + `.[]` would
+          # also reject a legitimate empty array (no output => -e fails).
+          VALIDATED_RUNS="${AUDIT_DIR}/runs.validated.jsonl"
+          if ! echo "${RUNS}" | jq -e '
+            (type == "array")
+            and all(
+              (type == "object")
+              and ((.run_id | type == "string") or (.run_id | type == "number"))
+              and ((.run_id | tostring | length) > 0)
+              and (.repo | type == "string")
+              and (.repo | length > 0)
+            )
+          ' >/dev/null; then
+            echo "::error::Invalid RUNS input -- refusing to audit with an unverified run list"
+            exit 1
+          fi
+          echo "${RUNS}" | jq -c '.[] | {run_id: (.run_id | tostring), repo}' > "${VALIDATED_RUNS}"
+
+          # Reading a file (not a trailing pipe) so the loop runs in this
+          # shell, not a subshell -- otherwise FLAGGED/SKIPPED_SCANS
+          # wouldn't survive past the loop.
+          while IFS= read -r ITEM; do
+            RUN_ID=$(echo "${ITEM}" | jq -r '.run_id')
+            REPO=$(echo "${ITEM}" | jq -r '.repo')
+            SLUG="${REPO//\//_}-${RUN_ID}"
+            echo "::group::Auditing run ${RUN_ID} (${REPO})"
+            OUTPUT_DIR="${AUDIT_DIR}/${SLUG}"
+            # `if ! process_one_run ...; then` (not a bare call), matching
+            # this skill's own documented pattern for calling a function
+            # whose body relies on suspended errexit: belt-and-suspenders
+            # alongside the function's own explicit `return 0` above, so a
+            # future edit that reintroduces a bad last-statement inside the
+            # function still can't abort the whole loop from here.
+            if ! process_one_run "${RUN_ID}" "${REPO}" "${OUTPUT_DIR}" "${SLUG}"; then
+              echo "::warning::process_one_run returned non-zero unexpectedly for run ${RUN_ID} (${REPO})"
+            fi
+            echo "::endgroup::"
+          done < "${VALIDATED_RUNS}"
+
+          echo "flagged-count=${FLAGGED}" >> "$GITHUB_OUTPUT"
+          echo "skipped-scans=${SKIPPED_SCANS}" >> "$GITHUB_OUTPUT"
+          echo "processing-failures=${PROCESSING_FAILURES}" >> "$GITHUB_OUTPUT"
+          echo "purge-failures=${PURGE_FAILURES}" >> "$GITHUB_OUTPUT"
+          echo "SUMMARY_JSONL=${SUMMARY_JSONL}" >> "$GITHUB_ENV"
+          echo "ALL_REDACTED_DIR=${ALL_REDACTED_DIR}" >> "$GITHUB_ENV"
+
+      - name: Upload combined redacted logs
+        id: upload-redacted
+        if: steps.scan.outputs.flagged-count != '0'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: audit-redacted-logs-${{ github.run_id }}
+          path: ${{ env.ALL_REDACTED_DIR }}
+          retention-days: 30
+
+      - name: Write job summary
+        if: always()
+        id: summary
+        env:
+          # Not '|| success/failure' fallback -- steps.scan.outcome always
+          # resolves to one of success/failure/cancelled/skipped by the time
+          # this step (always()) runs, since "Scan each run's logs" is
+          # earlier in the job.
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          FLAGGED_COUNT: ${{ steps.scan.outputs.flagged-count || '0' }}
+          # GitHub Actions expressions have no arithmetic operators, so the
+          # two skip counters are added in bash below, not here.
+          SKIPPED_TARGETS: ${{ steps.list.outputs.skipped-targets || '0' }}
+          SKIPPED_SCANS: ${{ steps.scan.outputs.skipped-scans || '0' }}
+          PURGE_FAILURES: ${{ steps.scan.outputs.purge-failures || '0' }}
+          PROCESSING_FAILURES: ${{ steps.scan.outputs.processing-failures || '0' }}
+          DISCOVERY_FAILED: ${{ steps.list.outputs.discovery-failed || 'false' }}
+          # 'skipped' (not just 'failure') when flagged-count is '0' -- the
+          # upload step's own `if:` never runs it in that case. Only
+          # meaningful when FLAGGED_COUNT != '0' below.
+          UPLOAD_OUTCOME: ${{ steps.upload-redacted.outcome || 'skipped' }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          SKIPPED_TOTAL=$((SKIPPED_TARGETS + SKIPPED_SCANS))
+          {
+            echo "## Workflow log audit"
+            echo ""
+            # "skipped" here means an earlier step (secrets bootstrap or run
+            # discovery) failed, so "Scan each run's logs" never ran at all --
+            # FLAGGED_COUNT/SKIPPED_TOTAL would misleadingly read all-zero in
+            # that case (nothing to flag if nothing was scanned), so this must
+            # be checked *before* falling back to the "no leaks" message.
+            if [[ "${SCAN_OUTCOME}" != "success" ]]; then
+              echo ":x: Audit did not complete -- \"Scan each run's logs\" ended in **${SCAN_OUTCOME}** (likely an earlier step failed). Results below are incomplete, not a clean pass -- see job logs."
+            elif [[ "${FLAGGED_COUNT}" == "0" ]]; then
+              echo "No leaked credentials found in this audit window."
+            elif [[ "${UPLOAD_OUTCOME}" == "success" ]]; then
+              echo ":rotating_light: **${FLAGGED_COUNT}** run(s) had leaked credential(s) -- see the tracking issue and \`audit-redacted-logs-${RUN_ID}\` artifact."
+            else
+              # Don't promise an artifact that isn't there -- the upload
+              # step's own outcome (not just "did we try") tells us whether
+              # it actually landed.
+              echo ":rotating_light: **${FLAGGED_COUNT}** run(s) had leaked credential(s) -- see the tracking issue. :warning: The \`audit-redacted-logs-${RUN_ID}\` artifact upload did not succeed (outcome: **${UPLOAD_OUTCOME}**) -- redacted copies are not available from this run."
+            fi
+            if [[ "${SKIPPED_TOTAL}" != "0" ]]; then
+              echo ""
+              echo ":warning: **${SKIPPED_TOTAL}** target(s)/run(s) could not be listed or scanned this time (see \`::warning::\` annotations above) -- this audit is partial, not a clean pass."
+            fi
+            if [[ "${DISCOVERY_FAILED}" == "true" ]]; then
+              echo ""
+              echo ":warning: Cross-repo caller discovery failed -- only this repo's own workflows were audited this time, not the other known callers -- this audit is partial, not a clean pass."
+            fi
+            if [[ "${PURGE_FAILURES}" != "0" ]]; then
+              echo ""
+              echo ":rotating_light: **${PURGE_FAILURES}** flagged run(s) could not have their raw logs deleted -- the exposure window is **NOT** closed for those runs (see the tracking issue's \"Purged\" column)."
+            fi
+            if [[ "${PROCESSING_FAILURES}" != "0" ]]; then
+              echo ""
+              echo ":warning: **${PROCESSING_FAILURES}** flagged run(s) were detected but couldn't be fully recorded (redacted-copy or summary write failed) -- they still count toward the total above, but may be missing from the tracking issue table or combined artifact."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "skipped-total=${SKIPPED_TOTAL}" >> "$GITHUB_OUTPUT"
+
+          NOTIFY_PARTS=()
+          [[ "${SCAN_OUTCOME}" != "success" ]] && NOTIFY_PARTS+=("audit did not complete -- see job logs")
+          [[ "${FLAGGED_COUNT}" != "0" ]] && NOTIFY_PARTS+=("${FLAGGED_COUNT} run(s) with leaked credential(s)")
+          [[ "${SKIPPED_TOTAL}" != "0" ]] && NOTIFY_PARTS+=("${SKIPPED_TOTAL} target(s)/run(s) not scanned (partial audit)")
+          [[ "${DISCOVERY_FAILED}" == "true" ]] && NOTIFY_PARTS+=("cross-repo caller discovery failed (partial audit)")
+          [[ "${PURGE_FAILURES}" != "0" ]] && NOTIFY_PARTS+=("${PURGE_FAILURES} run(s) with unclosed exposure window (purge failed)")
+          [[ "${PROCESSING_FAILURES}" != "0" ]] && NOTIFY_PARTS+=("${PROCESSING_FAILURES} run(s) detected but not fully recorded")
+          # "${arr[*]}" with IFS set only honors the *first* IFS character
+          # when joining, so a ", " separator needs an explicit printf join
+          # instead.
+          NOTIFY_MESSAGE=$(printf ', %s' "${NOTIFY_PARTS[@]}")
+          NOTIFY_MESSAGE="${NOTIFY_MESSAGE#, }"
+          echo "notify-message=${NOTIFY_MESSAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Report findings
+        # always(): a bare condition implicitly ANDs with success() of every
+        # prior step in the job, so if "Upload combined redacted logs" fails
+        # *after* findings were already detected, incident reporting would
+        # otherwise be skipped too -- exactly when it matters most. Gate on
+        # steps.scan.outcome explicitly rather than relying on always() alone,
+        # so this doesn't also fire (and blow up on a missing SUMMARY_JSONL)
+        # if the scan step itself never got that far.
+        if: >
+          always() &&
+          steps.scan.outcome == 'success' &&
+          steps.scan.outputs.flagged-count != '0'
+        env:
+          # This repo's own token is enough here: the tracking issue is
+          # always created/updated in this repo, regardless of which repo
+          # a flagged run came from (unlike run listing/log fetch above,
+          # which need the org-scoped token to reach other repos).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FLAGGED_COUNT: ${{ steps.scan.outputs.flagged-count }}
+          UPLOAD_OUTCOME: ${{ steps.upload-redacted.outcome || 'skipped' }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ARTIFACT_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts
+        run: |
+          echo "::group::Build findings body"
+          BODY_FILE="${RUNNER_TEMP}/issue-body.md"
+          {
+            echo "Automated audit found leaked credential(s) in **${FLAGGED_COUNT}** e2e workflow run(s)."
+            echo ""
+            if [[ "${UPLOAD_OUTCOME}" == "success" ]]; then
+              echo "A redacted copy of each is in the"
+              echo "[\`audit-redacted-logs-${RUN_ID}\`](${ARTIFACT_URL}) artifact from [this audit run](${RUN_URL})."
+            else
+              echo ":warning: The \`audit-redacted-logs-${RUN_ID}\` artifact upload did not succeed (outcome: **${UPLOAD_OUTCOME}**) --"
+              echo "redacted copies are not available from this run; see [the run logs](${RUN_URL}) instead."
+            fi
+            echo "Raw logs were deleted for runs marked :white_check_mark: below -- for any marked :x:,"
+            echo "the exposure window is still open and the raw logs need to be deleted manually."
+            echo ""
+            echo "| Repo | Run | Findings | Rule(s) | Purged |"
+            echo "|---|---|---|---|---|"
+            jq -r '"| \(.repo) | [\(.run_id)](https://github.com/\(.repo)/actions/runs/\(.run_id)) | \(.findings_count) | " + ([.findings[].rule] | unique | join(", ")) + " | " + (if .purge_ok then ":white_check_mark:" else ":x:" end) + " |"' "${SUMMARY_JSONL}"
+            echo ""
+            echo "Rotate any credential(s) above that are real (not test/dev-only values)."
+          } > "${BODY_FILE}"
+          echo "::endgroup::"
+
+          echo "::group::Create or update tracking issue"
+          # --connect-timeout/--max-time on all three calls: without them, a
+          # stuck GitHub API can tie up this (self-hosted, persistent) audit
+          # runner until the job hits its own timeout, blocking later audits
+          # from ever starting instead of failing this one fast.
+          EXISTING=$(curl -sL --connect-timeout 10 --max-time 30 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues?state=open&labels=credential-leak&per_page=1")
+          ISSUE_NUMBER=$(echo "${EXISTING}" | jq -r '.[0].number // empty')
+
+          # --fail-with-body: without it, curl exits 0 (and this step "succeeds")
+          # even on a 4xx/5xx response, so a permission/label/validation problem
+          # would silently skip incident reporting entirely.
+          if [[ -n "${ISSUE_NUMBER}" ]]; then
+            echo "Appending to existing issue #${ISSUE_NUMBER}."
+            curl -sL --fail-with-body --connect-timeout 10 --max-time 30 -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+              -d "$(jq -n --rawfile body "${BODY_FILE}" '{body: $body}')"
+          else
+            echo "Creating new tracking issue."
+            curl -sL --fail-with-body --connect-timeout 10 --max-time 30 -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues" \
+              -d "$(jq -n --rawfile body "${BODY_FILE}" \
+                '{title: "OSAC-1684: Leaked credentials detected in e2e workflow logs", body: $body, labels: ["credential-leak"]}')"
+          fi
+          echo "::endgroup::"
+
+      - name: Notify Slack
+        # always(): a bare boolean condition implicitly ANDs with success(),
+        # so without this, a hard failure upstream (not just a tracked
+        # SCAN_OK=false) would skip this notification -- exactly the failure
+        # most worth alerting on. steps.vault.outcome == 'success' is required
+        # too: if Vault/AppRole itself is what failed, SLACK_WEBHOOK_URL is
+        # empty and posting to it would just fail a second time with a
+        # confusing curl error, so we don't attempt it -- the job's own
+        # failed status is the fallback signal in that specific case. This is
+        # an accepted gap (no secrets channel independent of Vault exists in
+        # this project by design) rather than a fix.
+        # steps.scan.outputs.purge-failures isn't listed separately here --
+        # a purge failure can only happen on a run that's already flagged
+        # (flagged-count != '0'), so it's already implied by that condition.
+        # steps.summary.outcome != 'success' is listed explicitly, though:
+        # "Write job summary" can itself fail after an otherwise-clean scan,
+        # which would leave every other predicate here false and silently
+        # skip the alert on exactly the step that's supposed to catch this.
+        if: >
+          always() &&
+          steps.vault.outcome == 'success' &&
+          (steps.scan.outcome != 'success' || steps.summary.outcome != 'success' || steps.scan.outputs.flagged-count != '0' || steps.summary.outputs.skipped-total != '0' || steps.list.outputs.discovery-failed == 'true')
+        uses: ./.github/actions/notify-slack
+        with:
+          status: failure
+          workflow-name: "Workflow log audit"
+          failed-step: "${{ steps.summary.outputs.notify-message || 'Audit incomplete -- see run logs' }}"
+          slack-webhook-url: ${{ steps.vault.outputs.SLACK_WEBHOOK_URL }}
+          workflow-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          branch-name: ${{ github.ref_name }}
+          commit-sha: ${{ github.sha }}
+          artifact-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts
