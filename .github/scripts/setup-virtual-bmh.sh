@@ -144,6 +144,7 @@ for i in $(seq 1 "${BMH_COUNT}"); do
     <boot dev='network'/>
     <boot dev='hd'/>
   </os>
+  <cpu mode='host-passthrough' check='none' migratable='on'/>
   <features>
     <acpi/>
     <apic/>
