@@ -35,33 +35,42 @@ if [[ -n "${COMPONENT_IMAGE:-}" ]]; then
 fi
 
 # --- Clean up BMaaS virtual BMH resources ---
-# These env vars are set by setup-virtual-bmh.sh via $GITHUB_ENV.
-# When unset, no BMaaS cleanup runs — VMaaS teardown is unaffected.
-if [[ -n "${BMH_VM_NAMES:-}" ]]; then
+# All paths are derived from CLONE_NAME so teardown works even if setup
+# failed before exporting state. When no matching resources exist, cleanup
+# is a no-op (VMaaS teardown unaffected).
+# NOTE: naming conventions here must match setup-virtual-bmh.sh.
+VIRSH="virsh -c qemu:///system"
+BMH_VM_PREFIX="virtual-bmh-${CLONE_NAME}-"
+BMH_VM_NAMES=$(${VIRSH} list --all --name 2>/dev/null | grep "^${BMH_VM_PREFIX}" || true)
+if [[ -n "${BMH_VM_NAMES}" ]]; then
   echo "Cleaning up virtual BMH VMs..."
   for VM_NAME in ${BMH_VM_NAMES}; do
-    virsh -c qemu:///system destroy "${VM_NAME}" 2>/dev/null || true
-    virsh -c qemu:///system undefine "${VM_NAME}" --nvram 2>/dev/null || true
+    ${VIRSH} destroy "${VM_NAME}" 2>/dev/null || true
+    ${VIRSH} undefine "${VM_NAME}" --nvram 2>/dev/null || true
     echo "  Removed VM: ${VM_NAME}"
   done
 fi
 
-if [[ -n "${BMH_POOL_NAME:-}" ]]; then
+BMH_POOL_NAME="bmh-${CLONE_NAME}"
+if ${VIRSH} pool-info "${BMH_POOL_NAME}" &>/dev/null; then
   echo "Removing libvirt storage pool ${BMH_POOL_NAME}..."
-  virsh -c qemu:///system pool-destroy "${BMH_POOL_NAME}" 2>/dev/null || true
-  virsh -c qemu:///system pool-undefine "${BMH_POOL_NAME}" 2>/dev/null || true
+  ${VIRSH} pool-destroy "${BMH_POOL_NAME}" 2>/dev/null || true
+  ${VIRSH} pool-undefine "${BMH_POOL_NAME}" 2>/dev/null || true
 fi
 
-if [[ -n "${BMH_DISK_DIR:-}" ]] && [[ -d "${BMH_DISK_DIR}" ]]; then
+BMH_DISK_DIR="/tmp/virtual-bmh-disks-${CLONE_NAME}"
+if [[ -d "${BMH_DISK_DIR}" ]]; then
   rm -rf "${BMH_DISK_DIR}"
 fi
 
-if [[ -n "${SUSHY_PID_FILE:-}" ]] && [[ -f "${SUSHY_PID_FILE}" ]]; then
+SUSHY_CONFIG_DIR="${HOME}/sushy-${CLONE_NAME}"
+SUSHY_PID_FILE="${SUSHY_CONFIG_DIR}/sushy.pid"
+if [[ -f "${SUSHY_PID_FILE}" ]]; then
   echo "Stopping sushy-emulator..."
   kill "$(cat "${SUSHY_PID_FILE}")" 2>/dev/null || true
   rm -f "${SUSHY_PID_FILE}"
 fi
 
-if [[ -n "${SUSHY_CONFIG_DIR:-}" ]] && [[ -d "${SUSHY_CONFIG_DIR}" ]]; then
+if [[ -d "${SUSHY_CONFIG_DIR}" ]]; then
   rm -rf "${SUSHY_CONFIG_DIR}"
 fi

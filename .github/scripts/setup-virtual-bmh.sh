@@ -15,10 +15,7 @@
 #   BMH_COUNT      — number of virtual BMHs to create (default: 2)
 #   SUSHY_PORT     — sushy-tools listen port (default: 8000)
 #
-# Outputs (written to $GITHUB_ENV when running in GitHub Actions):
-#   BMH_VM_NAMES       — space-separated list of libvirt VM names (for teardown)
-#   SUSHY_PID_FILE     — path to the sushy-emulator PID file (for teardown)
-#   SUSHY_CONFIG_DIR   — path to the sushy-tools config directory (for teardown)
+# Teardown derives all paths from CLONE_NAME — no GITHUB_ENV exports needed.
 set -euo pipefail
 
 : "${CLONE_NAME:?CLONE_NAME is required}"
@@ -32,6 +29,7 @@ SUSHY_PID_FILE="${SUSHY_CONFIG_DIR}/sushy.pid"
 CT_NETWORK="test-infra-net-${CLONE_NAME}"
 VIRSH="virsh -c qemu:///system"
 VM_DISK_DIR="/tmp/virtual-bmh-disks-${CLONE_NAME}"
+POOL_NAME="bmh-${CLONE_NAME}"
 
 # --- Step 1: Activate Ironic via Provisioning CR ---
 echo "==> Activating Ironic (Provisioning CR)..."
@@ -72,7 +70,6 @@ print(root.find('.//ip').get('address'))
 echo "Gateway IP (host): ${GW_IP}"
 
 # --- Step 3: Create libvirt storage pool for sushy-tools ---
-POOL_NAME="bmh-${CLONE_NAME}"
 echo "==> Creating libvirt storage pool '${POOL_NAME}'..."
 mkdir -p "${VM_DISK_DIR}"
 chmod 777 "${VM_DISK_DIR}"
@@ -258,14 +255,5 @@ for VM_NAME in ${VM_NAMES}; do
     osac.openshift.io/host-type=default --overwrite
   echo "  Labeled ${VM_NAME}"
 done
-
-# --- Export env vars for teardown ---
-if [[ -n "${GITHUB_ENV:-}" ]]; then
-  echo "BMH_VM_NAMES=${VM_NAMES}" >> "${GITHUB_ENV}"
-  echo "BMH_POOL_NAME=${POOL_NAME}" >> "${GITHUB_ENV}"
-  echo "BMH_DISK_DIR=${VM_DISK_DIR}" >> "${GITHUB_ENV}"
-  echo "SUSHY_PID_FILE=${SUSHY_PID_FILE}" >> "${GITHUB_ENV}"
-  echo "SUSHY_CONFIG_DIR=${SUSHY_CONFIG_DIR}" >> "${GITHUB_ENV}"
-fi
 
 echo "==> Virtual BMH setup complete. ${BMH_COUNT} hosts available."
