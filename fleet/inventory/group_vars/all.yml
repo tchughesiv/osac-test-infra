@@ -1,0 +1,21 @@
+# Shared defaults for the ci_runners group. Override per-host in
+# fleet/inventory/host_vars/<hostname>.yml if a specific machine differs.
+
+# REQUIRED: pin an explicit osac CLI version for the fleet instead of always
+# installing "latest" -- see docs/new-ci-machine-setup.md and
+# https://github.com/osac-project/fulfillment-service/releases. Pinning
+# means every host converges to the same version regardless of when it was
+# last touched, instead of drifting based on install date (the failure mode
+# of scripts/machine-init.sh's install_osac(), which always resolves
+# "latest" unless OSAC_VERSION is set for that one invocation).
+osac_version: ""
+
+# Matches scripts/machine-init.sh's create_runner_user() RUNNER_COUNT default
+# (osac-ci-1's current topology). Override per-host if a machine runs a
+# different number of GitHub Actions runner instances.
+runner_count: 5
+
+# Optional: pins scripts/machine-init.sh's --data-path for the cluster-tool
+# step. Leave unset to keep the script's own auto-detect-largest-partition
+# behavior.
+# cluster_tool_data_path: /data/cluster-tool

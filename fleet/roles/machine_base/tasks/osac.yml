@@ -1,0 +1,36 @@
+---
+# Native task, not a wrap: fixes scripts/machine-init.sh's install_osac(),
+# which always redownloads whenever $OSAC_VERSION is set (no idempotency
+# check against what's already installed). Requires osac_version to be
+# pinned in fleet/inventory/group_vars/all.yml -- see that file for why a
+# fleet should converge on one pinned version rather than "latest".
+- name: Fail if osac_version is not pinned
+  ansible.builtin.fail:
+    msg: >-
+      osac_version is not set. Pin a version in
+      fleet/inventory/group_vars/all.yml before running this step.
+  when: not osac_version
+
+- name: Check installed osac version
+  ansible.builtin.command: osac version
+  register: _osac_installed
+  changed_when: false
+  failed_when: false
+
+# Word-boundary match, not substring containment -- osac_version "1.4.2"
+# must not be considered "already installed" just because the installed
+# version happens to be "1.4.20" (which contains "1.4.2" as a literal
+# substring). regex_escape guards against osac_version's dots being
+# interpreted as regex wildcards.
+- name: Determine whether the pinned osac version is already installed
+  ansible.builtin.set_fact:
+    _osac_up_to_date: >-
+      {{ _osac_installed.rc == 0 and
+         _osac_installed.stdout is search('\b' + (osac_version | regex_escape) + '\b') }}
+
+- name: Download osac CLI
+  ansible.builtin.get_url:
+    url: "https://github.com/osac-project/fulfillment-service/releases/download/v{{ osac_version }}/osac_Linux_x86_64"
+    dest: /usr/local/bin/osac
+    mode: "0755"
+  when: not _osac_up_to_date

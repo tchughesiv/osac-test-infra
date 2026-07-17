@@ -1,0 +1,26 @@
+---
+# Native from day one (trivial, no wrapping benefit) -- mirrors
+# scripts/machine-init.sh's install_packages().
+- name: Install system packages
+  ansible.builtin.dnf:
+    name:
+      - libvirt
+      - qemu-kvm
+      - podman
+      - podman-docker
+      - pigz
+      - haproxy
+      - skopeo
+      - zstd
+      - jq
+      - git
+      - dnf-plugins-core
+      - dnsmasq
+      - python3
+      - python3-pip
+    state: present
+
+- name: Install ansible-builder (needed for AAP execution-environment images)
+  ansible.builtin.pip:
+    name: ansible-builder
+    extra_args: --quiet

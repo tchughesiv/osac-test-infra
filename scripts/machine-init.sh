@@ -410,7 +410,7 @@ setup_cluster_tool() {
         if [[ -d "${CLUSTER_TOOL_DIR}" ]]; then
             git -C "${CLUSTER_TOOL_DIR}" pull --ff-only
         else
-            git clone https://github.com/omer-vishlitzky/cluster-tool.git "${CLUSTER_TOOL_DIR}"
+            git clone https://github.com/osac-project/cluster-tool.git "${CLUSTER_TOOL_DIR}"
         fi
         install -m 0755 "${CLUSTER_TOOL_DIR}/cluster-tool" "${CLUSTER_TOOL_BIN}"
         echo "    cluster-tool installed at ${CLUSTER_TOOL_BIN}"

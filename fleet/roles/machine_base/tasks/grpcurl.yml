@@ -1,0 +1,8 @@
+---
+# Phase 1: wrap as-is -- already idempotent (skips install if the pinned
+# version is present).
+- name: Run machine-init.sh grpcurl
+  ansible.builtin.script: "{{ playbook_dir }}/../../scripts/machine-init.sh grpcurl"
+  register: _grpcurl_result
+  changed_when: "'already installed' not in _grpcurl_result.stdout"
+  failed_when: _grpcurl_result.rc != 0

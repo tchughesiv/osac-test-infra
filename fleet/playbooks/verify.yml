@@ -1,0 +1,13 @@
+---
+# Read-only: reports installed versions/state without changing anything.
+# Runs the machine_base role's verify step directly rather than the full
+# role, so this playbook never has side effects regardless of --tags usage.
+#
+#   ansible-playbook fleet/playbooks/verify.yml --limit <host>
+- name: Verify OSAC CI fleet host state
+  hosts: ci_runners
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Verify
+      ansible.builtin.import_tasks: ../roles/machine_base/tasks/verify.yml

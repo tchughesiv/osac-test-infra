@@ -1,0 +1,7 @@
+---
+# Phase 1: wrap as-is -- already idempotent (skips install if vault is present).
+- name: Run machine-init.sh vault
+  ansible.builtin.script: "{{ playbook_dir }}/../../scripts/machine-init.sh vault"
+  register: _vault_result
+  changed_when: "'already installed' not in _vault_result.stdout"
+  failed_when: _vault_result.rc != 0

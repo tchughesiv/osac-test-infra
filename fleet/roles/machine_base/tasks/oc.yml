@@ -1,0 +1,7 @@
+---
+# Phase 1: wrap as-is -- already idempotent (skips download if oc is present).
+- name: Run machine-init.sh oc
+  ansible.builtin.script: "{{ playbook_dir }}/../../scripts/machine-init.sh oc"
+  register: _oc_result
+  changed_when: "'already installed' not in _oc_result.stdout"
+  failed_when: _oc_result.rc != 0

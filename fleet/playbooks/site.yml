@@ -1,0 +1,15 @@
+---
+# Full provisioning of one or more fleet hosts -- the Ansible equivalent of
+# `sudo ./scripts/machine-init.sh` with no step arguments (all steps).
+#
+# New machine:
+#   ansible-playbook fleet/playbooks/site.yml --limit <new-host>
+#
+# serial: 1 is the safety net for accidental unscoped runs against the
+# whole ci_runners group -- see fleet/README.md.
+- name: Provision OSAC CI fleet host(s)
+  hosts: ci_runners
+  become: true
+  serial: 1
+  roles:
+    - machine_base

@@ -1,0 +1,11 @@
+---
+# Phase 1: wraps the existing script as-is, including its known wart of
+# unconditionally restarting sshd/haproxy/journald every run (no regression
+# vs. today's manual process). Phase 2 converts this to native tasks +
+# handlers so restarts only fire on actual config change -- see
+# fleet/README.md.
+- name: Run machine-init.sh services
+  ansible.builtin.script: "{{ playbook_dir }}/../../scripts/machine-init.sh services"
+  register: _services_result
+  changed_when: true
+  failed_when: _services_result.rc != 0

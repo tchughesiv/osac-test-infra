@@ -1,0 +1,22 @@
+---
+# Push a targeted change to already-provisioned fleet hosts. Functionally
+# identical to site.yml (both just run the machine_base role) -- the
+# distinction is usage: always pair this with --tags for the step(s) you're
+# actually changing, and --limit to a canary host first. See the "Day-to-day
+# workflow" section in fleet/README.md for the full dry-run -> canary ->
+# widen sequence.
+#
+#   ansible-playbook fleet/playbooks/update.yml --limit <canary> \
+#     --tags <step>[,<step>...] --check --diff   # dry run first
+#   ansible-playbook fleet/playbooks/update.yml --limit <canary> \
+#     --tags <step>[,<step>...]                  # apply to canary
+#   ansible-playbook fleet/playbooks/update.yml --limit <host1>,<host2> \
+#     --tags <step>[,<step>...]                  # widen once confirmed
+#
+# serial: 1 remains the backstop once --limit is dropped for a wider rollout.
+- name: Update existing OSAC CI fleet hosts
+  hosts: ci_runners
+  become: true
+  serial: 1
+  roles:
+    - machine_base

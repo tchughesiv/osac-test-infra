@@ -1,0 +1,12 @@
+---
+# Phase 1: wrap the existing, unmodified script rather than reimplementing
+# its sudoers-generation logic. RUNNER_COUNT is passed through so a host
+# with a different number of registered runner instances can override it
+# via fleet/inventory group_vars/host_vars (see fleet/inventory/group_vars/all.yml).
+- name: Run machine-init.sh runner-user
+  ansible.builtin.script: "{{ playbook_dir }}/../../scripts/machine-init.sh runner-user"
+  environment:
+    RUNNER_COUNT: "{{ runner_count }}"
+  register: _runner_user_result
+  changed_when: true
+  failed_when: _runner_user_result.rc != 0

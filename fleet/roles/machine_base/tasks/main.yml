@@ -1,0 +1,49 @@
+---
+# One task file per scripts/machine-init.sh step (plus two native fixes),
+# tagged to match so fleet/playbooks/update.yml can select a subset via
+# --tags. See fleet/README.md for the wrap-first rationale: Phase 1 invokes
+# the existing, unmodified script per step rather than reimplementing its
+# logic, except for the two steps already known to be non-idempotent
+# (cluster-tool's git handling, osac's version handling), which are native
+# tasks instead.
+#
+# Privilege escalation is handled once, at the play level (site.yml/
+# update.yml/verify.yml all set become: true) -- don't add become: true to
+# individual tasks here, it's redundant and was previously inconsistent
+# across files (some had it, some didn't, all happened to work anyway
+# since ansible_user is root -- see fleet/inventory/hosts.yml).
+- name: Packages
+  ansible.builtin.import_tasks: packages.yml
+  tags: [packages]
+
+- name: Runner user
+  ansible.builtin.import_tasks: runner_user.yml
+  tags: [runner-user]
+
+- name: Services
+  ansible.builtin.import_tasks: services.yml
+  tags: [services]
+
+- name: OpenShift CLI
+  ansible.builtin.import_tasks: oc.yml
+  tags: [oc]
+
+- name: Osac CLI
+  ansible.builtin.import_tasks: osac.yml
+  tags: [osac]
+
+- name: Cluster-tool
+  ansible.builtin.import_tasks: cluster_tool.yml
+  tags: [cluster-tool]
+
+- name: Vault CLI
+  ansible.builtin.import_tasks: vault_cli.yml
+  tags: [vault]
+
+- name: Grpcurl
+  ansible.builtin.import_tasks: grpcurl.yml
+  tags: [grpcurl]
+
+- name: Verify
+  ansible.builtin.import_tasks: verify.yml
+  tags: [verify]

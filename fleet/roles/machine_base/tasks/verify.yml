@@ -1,0 +1,12 @@
+---
+# Read-only: wraps the script's own verify step, which reports a non-zero
+# exit code if any check fails.
+- name: Run machine-init.sh verify
+  ansible.builtin.script: "{{ playbook_dir }}/../../scripts/machine-init.sh verify"
+  register: _verify_result
+  changed_when: false
+  failed_when: _verify_result.rc != 0
+
+- name: Show verify output
+  ansible.builtin.debug:
+    msg: "{{ _verify_result.stdout_lines }}"

@@ -1,0 +1,23 @@
+---
+# scripts/machine-init.sh's setup_cluster_tool() fails if /opt/cluster-tool
+# exists but is dirty/diverged (`git pull --ff-only`). Since this directory
+# is machine-managed build source, not anyone's work in progress, force it
+# clean *before* invoking the script, so its own internal git handling
+# always hits the trivial "already up to date" path. This is the one
+# genuinely non-idempotent step fixed natively in Phase 1; the rest of this
+# step's logic (config dir, data path, SSH keypair, DNS setup) stays
+# wrapped -- see fleet/README.md.
+- name: Ensure cluster-tool source repo is present and clean
+  ansible.builtin.git:
+    repo: https://github.com/osac-project/cluster-tool.git
+    dest: /opt/cluster-tool
+    version: main
+    force: true
+
+- name: Run machine-init.sh cluster-tool
+  ansible.builtin.script: >-
+    {{ playbook_dir }}/../../scripts/machine-init.sh cluster-tool
+    {{ ('--data-path ' ~ cluster_tool_data_path) if cluster_tool_data_path is defined else '' }}
+  register: _cluster_tool_result
+  changed_when: true
+  failed_when: _cluster_tool_result.rc != 0
