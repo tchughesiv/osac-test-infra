@@ -26,6 +26,22 @@ rm -f "${REGISTRY_AUTH_FILE:-}" "$RUNNER_TEMP/auth.json"
 rm -f "${HOME}/.config/containers/auth.json"
 sudo rm -f /root/.config/containers/auth.json
 rm -rf "$RUNNER_TEMP/osac-installer"
+
+# Force-remove any container still referencing this run's test image before
+# trying to remove the image itself. `podman run --rm` normally handles
+# this, but if the container's process was killed abnormally (OOM, host
+# reboot, a cancelled job) before --rm's own cleanup could run, podman's
+# state store is left believing a now-dead container is still "running" --
+# crun confirms there's no real process behind it, but podman never learns
+# that. That permanently blocks `podman rmi` (which silently no-ops via
+# `2>/dev/null || true` below, so this was invisible), leaking the image
+# and its writable layer forever. Seen in production: 60+ such containers
+# had accumulated undetected across the CI fleet, some for 3+ weeks,
+# consuming the majority of disk on every affected host.
+for c in $(podman ps -a --filter ancestor="${E2E_IMAGE}" --format "{{.ID}}" 2>/dev/null); do
+  echo "Force-removing leftover container ${c} still referencing ${E2E_IMAGE}..."
+  podman rm -f "${c}" 2>/dev/null || true
+done
 podman rmi "${E2E_IMAGE}" 2>/dev/null || true
 
 # --- Clean up component image on runner ---
