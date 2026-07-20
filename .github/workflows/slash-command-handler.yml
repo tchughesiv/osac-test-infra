@@ -149,6 +149,7 @@ jobs:
         if: steps.cmd.outputs.command == 'ok-to-test'
         env:
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          HEAD_BRANCH: ${{ steps.pr.outputs.head_branch }}
         run: |
           echo "Adding ok-to-test label to PR #${PR_NUMBER}..."
 
@@ -157,7 +158,8 @@ jobs:
             gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
               --input - <<< '{"labels":["ok-to-test"]}' --silent
 
-          # Find and approve pending workflow runs for HEAD_SHA
+          # Find and approve pending workflow runs for HEAD_SHA (GitHub's
+          # native first-time-contributor/fork "action_required" gate)
           APPROVED=0
           PENDING_RUNS=$(gh api "repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&status=action_required" \
             --jq '.workflow_runs[].id' 2>/dev/null || true)
@@ -168,11 +170,32 @@ jobs:
             fi
           done
 
+          # Also rerun runs that already ran and failed at this SHA -- e.g. a
+          # fork PR's e2e run that hit the in-workflow "Authorize fork PR"
+          # gate (a custom check, not GitHub's native action_required state,
+          # so the approve loop above never catches it). Same lookup as the
+          # "Handle retest" step below.
+          RERUN=0
+          FAILED_RUNS=$(gh run list \
+            -R "${REPO}" \
+            --branch "${HEAD_BRANCH}" \
+            --status failure \
+            --limit 200 \
+            --json databaseId,headSha \
+            --jq "[.[] | select(.headSha == \"${HEAD_SHA}\") | .databaseId] | .[]")
+
+          for RUN_ID in ${FAILED_RUNS}; do
+            if gh run rerun "${RUN_ID}" -R "${REPO}" 2>/dev/null; then
+              RERUN=$((RERUN + 1))
+            fi
+          done
+
           # Post confirmation comment
-          if [[ ${APPROVED} -gt 0 ]]; then
-            MSG="Labeled \`ok-to-test\` and approved ${APPROVED} pending workflow run(s) for \`${HEAD_SHA:0:7}\`."
-          else
-            MSG="Labeled \`ok-to-test\`. No pending workflow runs found to approve — tests will be authorized on next trigger."
+          MSG="Labeled \`ok-to-test\`."
+          [[ ${APPROVED} -gt 0 ]] && MSG="${MSG} Approved ${APPROVED} pending workflow run(s)."
+          [[ ${RERUN} -gt 0 ]] && MSG="${MSG} Re-ran ${RERUN} failed run(s)."
+          if [[ ${APPROVED} -eq 0 && ${RERUN} -eq 0 ]]; then
+            MSG="${MSG} No pending or failed runs found for \`${HEAD_SHA:0:7}\` — tests will be authorized on next trigger."
           fi
           gh pr comment "${PR_NUMBER}" -R "${REPO}" --body "${MSG}"
 
