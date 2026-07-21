@@ -22,12 +22,19 @@ if [[ ! -d "${COMPONENT_SRC}" ]]; then
 fi
 
 REPO_NAME="${COMPONENT_REPO_NAME##*/}"
-SUBMODULE_PATH=$(find "${INSTALLER_DIR}/base/" -maxdepth 1 -type d -name "*${REPO_NAME}" | head -1)
+MATCHES=$(find "${INSTALLER_DIR}/base/" -maxdepth 1 -type d -name "*${REPO_NAME}")
+MATCH_COUNT=$(echo "${MATCHES}" | grep -c . || true)
 
-if [[ -n "${SUBMODULE_PATH}" ]]; then
-  echo "Replacing submodule ${SUBMODULE_PATH} with component source (${COMPONENT_REPO_NAME}@${COMPONENT_REF_NAME})..."
-  rm -rf "${SUBMODULE_PATH}"
-  cp -a "${COMPONENT_SRC}" "${SUBMODULE_PATH}"
+if [[ "${MATCH_COUNT}" -gt 1 ]]; then
+  echo "ERROR: multiple submodule matches for '${REPO_NAME}':" >&2
+  echo "${MATCHES}" >&2
+  exit 1
+elif [[ "${MATCH_COUNT}" -eq 0 ]]; then
+  echo "WARNING: no installer submodule matched '${REPO_NAME}'" >&2
+else
+  echo "Replacing submodule ${MATCHES} with component source (${COMPONENT_REPO_NAME}@${COMPONENT_REF_NAME})..."
+  rm -rf "${MATCHES}"
+  cp -a "${COMPONENT_SRC}" "${MATCHES}"
 fi
 
 rm -rf "${COMPONENT_SRC}"
