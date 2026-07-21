@@ -334,8 +334,6 @@ jobs:
           echo "COMPONENT_REPO_NAME=${COMPONENT_REPO}" >> "$GITHUB_ENV"
           echo "COMPONENT_REF_NAME=${COMPONENT_REF}" >> "$GITHUB_ENV"
 
-          rm -rf "$RUNNER_TEMP/component-src"
-
       - name: Build test image
         env:
           E2E_IMAGE: "osac-e2e-tests:${{ github.run_id }}"
@@ -383,6 +381,9 @@ jobs:
           git clone --recurse-submodules --depth 1 --branch "${INSTALLER_REF}" \
             "https://github.com/${INSTALLER_REPO}.git" "${INSTALLER_DIR}"
           cd "${INSTALLER_DIR}"
+
+          bash "${GITHUB_WORKSPACE}/.github/scripts/replace-installer-submodule.sh" \
+            "${INSTALLER_DIR}" "$RUNNER_TEMP/component-src"
 
           # OLM Subscriptions need a working CatalogSource to resolve operators.
           # After snapshot boot the marketplace pods may still be reconnecting.
