@@ -70,6 +70,31 @@ runs:
           exit 0
         fi
 
+        # PR author is not an org member — check if the fork *owner* is.
+        # GitHub Apps (e.g. osac-jira-ai-issue-solver[bot]) cannot be org
+        # members, but they may push to a fork owned by one (osac-dev-bot).
+        if [[ -n "${PR_NUMBER}" ]]; then
+          echo "::endgroup::"
+          echo "::group::Check fork owner org membership"
+          FORK_OWNER=$(curl -s \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${PR_REPO}/pulls/${PR_NUMBER}" \
+            | jq -r '.head.repo.owner.login // empty')
+          if [[ -n "${FORK_OWNER}" && "${FORK_OWNER}" != "${PR_AUTHOR}" ]]; then
+            OWNER_ENCODED=$(jq -rn --arg v "${FORK_OWNER}" '$v|@uri')
+            HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/orgs/osac-project/members/${OWNER_ENCODED}")
+            if [[ "${HTTP_CODE}" == "204" ]]; then
+              echo "Fork PR authorized: fork owner '${FORK_OWNER}' is an osac-project org member."
+              echo "::endgroup::"
+              exit 0
+            fi
+          fi
+        fi
+
         echo "::error::Fork PR blocked: '${PR_AUTHOR}' is not an osac-project org member."
         echo "::error::An org member can approve this PR for testing by commenting /ok-to-test"
         echo "::endgroup::"
