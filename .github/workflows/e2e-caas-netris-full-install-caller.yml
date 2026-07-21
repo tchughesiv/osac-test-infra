@@ -61,14 +61,6 @@ on:
         description: "Branch, tag, or commit of osac-installer to clone -- empty means main."
         required: false
         default: ""
-      osac-aap-repo:
-        description: "Override osac-aap git URI the AAP Project syncs ansible content from (e.g. a personal fork, to test a PR pre-merge) -- empty means the upstream repo. Not sensitive: a public repo URL."
-        required: false
-        default: ""
-      osac-aap-branch:
-        description: "Branch, tag, or commit of osac-aap for the AAP Project to sync ansible content from -- empty means main."
-        required: false
-        default: ""
 
 jobs:
   skeleton:
