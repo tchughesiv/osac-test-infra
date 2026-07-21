@@ -356,7 +356,7 @@ jobs:
             "https://github.com/${INSTALLER_REPO}.git" "${INSTALLER_DIR}"
           cd "${INSTALLER_DIR}"
 
-          bash "${{ github.workspace }}/.github/scripts/replace-installer-submodule.sh" \
+          bash "${GITHUB_WORKSPACE}/.github/scripts/replace-installer-submodule.sh" \
             "${INSTALLER_DIR}" "$RUNNER_TEMP/component-src"
 
           # OCP 4.22 catalogs don't carry older operator channels
